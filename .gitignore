@@ -1,0 +1,4 @@
+# Your personal settings and ESPN login cookies
+overlay_config.py
+__pycache__/
+*.pyc
