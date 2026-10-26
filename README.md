@@ -29,7 +29,7 @@ ESPN Fantasy API  ──(every 30 s)──>  fantasy_overlay.py on your PC  ─�
 
 - An Android TV / Google TV device (tested on an onn 4K box)
 - A computer on the same home network, left on during games (Windows instructions below; macOS and Linux work the same way with their own terminal)
-- Python 3.10 or newer
+- Python 3.10 or newer (espn-api requires it)
 - [ADB](https://developer.android.com/tools/releases/platform-tools), used once to install PiPup
 
 ## Install
@@ -62,12 +62,22 @@ adb shell appops set nl.rogro82.pipup SYSTEM_ALERT_WINDOW allow
 
 The second command grants the overlay permission, which Google TV has no settings screen for. Open PiPup on the TV once, then restart the TV.
 
+Prefer a script? The PiPup fork ships `install.ps1` (Windows) and `install.sh` (macOS/Linux) on its releases page. They download the APK, install it and grant the permission in one step, for example `.\install.ps1 192.168.1.50`.
+
+Reinstalling PiPup resets the overlay permission, so re-run the `appops` command after any manual reinstall.
+
 ### 3. Test the overlay
 
 With something playing on the TV:
 
 ```
 curl -X POST http://192.168.1.50:7979/notify -H "Content-Type: application/json" -d "{\"duration\":10,\"position\":5,\"title\":\"Test\",\"message\":\"Overlay works\"}"
+```
+
+That works in Command Prompt. In Windows PowerShell, `curl` means something else, so use this instead:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://192.168.1.50:7979/notify -ContentType "application/json" -Body '{"duration":10,"position":5,"title":"Test","message":"Overlay works"}'
 ```
 
 A card should appear at the top center of the screen.
@@ -107,7 +117,10 @@ python fantasy_overlay.py
 - On first run, allow Python through Windows Firewall on **Private networks**. The TV loads the scoreboard from your computer, so this is required.
 - The console prints a preview link like `http://192.168.1.23:8765/`. Open it in a browser to see the scoreboard.
 - The bar appears whenever a starter in your matchup has a game in progress. Set `ONLY_DURING_GAMES = False` to test anytime.
+- The script reconnects to ESPN every 6 hours, so it rolls over to the new week on its own if you leave it running.
 - Press **Ctrl+C** to stop; the bar disappears immediately. If the script dies, the bar clears itself within about 90 seconds.
+
+On macOS or Linux, run `python3 fantasy_overlay.py` instead.
 
 To run it in the background on Windows, use `pythonw fantasy_overlay.py` (stop it by ending `pythonw.exe` in Task Manager), or add it to Task Scheduler.
 
@@ -117,16 +130,16 @@ Any of these can go in `overlay_config.py`.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `TV_IP` | — | The TV's IP address |
-| `LEAGUE_ID` | — | Your ESPN league ID |
+| `TV_IP` | example value | The TV's IP address |
+| `LEAGUE_ID` | example value | Your ESPN league ID |
 | `YEAR` | 2026 | Season year |
-| `MY_TEAM` | — | All or part of your team name |
+| `MY_TEAM` | example value | All or part of your team name (not case-sensitive) |
 | `ESPN_S2`, `SWID` | None | Login cookies for private leagues |
 | `FETCH_SECONDS` | 30 | How often scores are pulled from ESPN |
 | `CYCLE_SECONDS` | 10 | How long each position matchup stays on screen |
 | `PAGE_REFRESH_SECONDS` | 5 | How often the bar picks up new scores |
 | `ONLY_DURING_GAMES` | True | Show the bar only while your matchup has a game in progress |
-| `POSITION` | 5 | 5 top center, 8 bottom center, 0 top right, 1 top left |
+| `POSITION` | 5 | Where the bar sits: 0 top right, 1 top left, 2 bottom right, 3 bottom left, 4 center, 5 top center, 6 bottom center, 7 center left, 8 center right |
 | `PANEL_WIDTH`, `PANEL_HEIGHT` | 820, 74 | Bar size; text scales to fit |
 | `PANEL_OPACITY` | 0.85 | Background darkness, 0 to 1 |
 | `WIN_SPREAD` | 0.7 | Win % volatility; higher is less confident |
@@ -145,9 +158,19 @@ ESPN's API doesn't expose its own win probability, so HUDdle estimates one. It s
 | Curl returns PopupProps but nothing shows | Re-run the `appops set` command; reinstalling PiPup resets it. |
 | `No module named 'requests'` | `python -m pip install espn-api requests` |
 | `espn_s2 and swid are required` | The league is private (add both cookies) or `LEAGUE_ID` is wrong. |
+| `cannot be accessed with the provided credentials` | Your cookies are wrong or have expired. Log in to ESPN again and copy fresh `espn_s2` and `SWID` values. |
+| `League ... does not exist` | Check `LEAGUE_ID` and `YEAR`. |
 | `No matchup found` | `MY_TEAM` doesn't match your ESPN team name. |
-| Bar appears but is blank | Windows Firewall is blocking port 8765; allow Python on Private networks. |
+| Bar appears but is blank | Windows Firewall is blocking port 8765; allow Python on Private networks. If the computer has a VPN or virtual network adapters, the auto-detected address may be wrong: open the preview link from a phone on the same Wi-Fi, and if it doesn't load, set `PC_IP` to the computer's real LAN address. |
+| Console says `No games in progress for your matchup - waiting` | Working as intended: `ONLY_DURING_GAMES` is on and none of your matchup's starters is playing right now. Set it to `False` to test. |
+| No **Wireless debugging** option on the TV | Older Android TV builds don't have it. Turn on **USB debugging** in Developer options instead, then try `adb connect 192.168.1.50:5555` and accept the prompt on the TV. This works on many boxes but hasn't been tested with HUDdle. |
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
+
+## Privacy and security
+
+- Your ESPN cookies stay on your computer. They are only sent to ESPN and are never included in the scoreboard page.
+- The scoreboard page on port 8765 has no login, so anyone on your home network can open it and see your matchup.
+- PiPup's port 7979 on the TV also has no login, so anyone on your network can put a popup on your TV. Keep both on a trusted home network, not a public or shared one.
 
 ## Disclaimer
 
