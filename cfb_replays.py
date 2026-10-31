@@ -88,6 +88,8 @@ CFB_PROMPT_SECONDS = 15       # how long the button stays up; ignoring it (or pr
 CFB_PROMPT_THUMBNAIL = True   # show a small still from the clip beside the text
 CFB_PROMPT_TEXT_SIZE = 13     # text size on the button card (PiPup's default is 16); smaller = smaller card
 CFB_PROMPT_POSITION = None    # where the button card sits (0-8 grid); None = same place as the clip
+CFB_CLOSE_BUTTON = True       # a ✕ button on the playing clip to close it (and skip its replay); while
+                              # a clip with ✕ is up, the remote's OK and arrow keys go to it, not the TV app
 CFB_CALLBACK_PORT = 8766      # port on this PC the TV reports button presses to
 PC_IP = None                  # this PC's LAN address as the TV sees it; None = auto-detect
 # ======================================================
@@ -494,7 +496,7 @@ def post_card(card):
         return False
 
 
-def show_clip(url, poster, seconds, title="", message=""):
+def show_clip(url, poster, seconds, title="", message="", close_callback=None):
     video = {"uri": url, "width": CFB_WIDTH, "height": CFB_HEIGHT, "muted": CFB_MUTED}
     if poster:
         video["poster"] = poster
@@ -505,7 +507,22 @@ def show_clip(url, poster, seconds, title="", message=""):
             "dismissScreensaver": False, "media": {"video": video}}
     if CFB_SHOW_CAPTION:
         card.update({"title": title, "message": message})
+    if close_callback:
+        # PiPup closes the popup itself when ✕ is pressed and tells us, so the replay can be skipped
+        card.update({"buttons": [{"id": "close", "label": "✕"}], "buttonsInline": True,
+                     "callback": close_callback})
     return post_card(card)
+
+
+def clip_on_screen():
+    """Whether our popup is still showing (False after ✕ or BACK), or None if the TV doesn't say."""
+    try:
+        popups = requests.get(f"http://{TV_IP}:7979/state", timeout=3).json().get("popups")
+    except (requests.RequestException, ValueError, AttributeError):
+        return None
+    if not isinstance(popups, list):
+        return None
+    return any(p == CARD_ID or (isinstance(p, dict) and p.get("id") == CARD_ID) for p in popups)
 
 
 def hide():
@@ -596,10 +613,12 @@ class ButtonServer:
 # ---------------- the watcher ----------------
 
 class Replays:
-    def __init__(self, x=None, selected=None, buttons=None):
+    def __init__(self, x=None, selected=None, buttons=None, ask_first=True, close_button=True):
         self.x = x                    # XClient for clips from X, or None for clips from ESPN
         self.selected = selected      # list of ESPN ids, or None for ranked mode
-        self.buttons = buttons        # ButtonServer to ask before playing, or None to just play
+        self.buttons = buttons        # ButtonServer for button presses, or None for no buttons
+        self.ask_first = bool(buttons) and ask_first          # "Watch replay" card before each clip
+        self.close_button = bool(buttons) and close_button    # ✕ on the playing clip
         self.prompt = None            # the clip being offered with a "Watch replay" button
         self.espn_seen = {}           # game id -> ESPN video ids already seen
         self.games = {}
@@ -787,10 +806,17 @@ class Replays:
     # --- TV ---
     def play_next(self, now):
         cur = self.current
+        if cur and cur.get("token") and self.buttons.pressed(cur["token"]) == "close":
+            self.closed(cur, now)
+            cur = None
         if cur and now >= cur["next_at"]:
             if cur["play"] < cur["plays"]:
-                self.replay(cur, now)
-                return
+                # Closed with BACK? PiPup doesn't report that, but its popup list does
+                if clip_on_screen() is False:
+                    self.closed(cur, now)
+                else:
+                    self.replay(cur, now)
+                    return
             self.current = None
         if self.prompt:
             offer = self.prompt
@@ -818,11 +844,17 @@ class Replays:
                    "short_title": score_short(game) if game else "",
                    "message": f"{text}  - {clip['credit']}" if text else clip["credit"],
                    "label": matchup(game) if game else "clip"}
-            if self.buttons:
+            if self.ask_first:
                 self.ask(cur, now)
             else:
                 self.start(cur, now)
             return
+
+    def closed(self, cur, now):
+        # Closed on the TV: skip any replays and let the next clip come up now
+        self.current = None
+        self.busy_until = now
+        log(f"Closed: {cur['label']}")
 
     def ask(self, cur, now):
         url, token = self.buttons.new_callback()
@@ -837,7 +869,10 @@ class Replays:
         # replay can take over before it closes
         play_time = math.ceil(cur["seconds"] or CFB_MAX_CLIP_SECONDS) + CFB_LOAD_SECONDS
         plays = max(1, int(CFB_PLAY_COUNT))
-        cur = {**cur, "play": 1, "plays": plays, "play_time": play_time, "next_at": now + play_time}
+        cur = {**cur, "play": 1, "plays": plays, "play_time": play_time, "next_at": now + play_time,
+               "close_url": None, "token": None}
+        if self.close_button:
+            cur["close_url"], cur["token"] = self.buttons.new_callback()
         if self.show(cur):
             self.current = cur
             self.busy_until = now + play_time * plays + 1
@@ -856,7 +891,11 @@ class Replays:
         title = cur["title"]
         if cur["plays"] > 1:
             title = f"{title}   ({cur['play']}/{cur['plays']})".strip()
-        return show_clip(cur["url"], cur["poster"], cur["play_time"] + 1, title, cur["message"])
+        # Keep the popup up a few seconds past the replay time, so a late loop tick still finds it
+        # on screen (and doesn't mistake it for closed); the replay replaces it anyway
+        linger = 6 if cur["play"] < cur["plays"] else 1
+        return show_clip(cur["url"], cur["poster"], cur["play_time"] + linger, title, cur["message"],
+                         cur.get("close_url"))
 
     def replay(self, cur, now):
         # PiPup keeps a video playing when the same popup is sent again, so close it and
@@ -920,23 +959,37 @@ def test_button():
     if not show_prompt(offer, CFB_PROMPT_SECONDS, url):
         return
     print(f"Press Watch replay (or ✕) on the TV within {CFB_PROMPT_SECONDS} seconds.")
-    button, deadline = None, time.time() + CFB_PROMPT_SECONDS + 5
-    try:
-        while button is None and time.time() < deadline:
+
+    def wait_for(token, seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
             buttons.wake.wait(1)
             buttons.wake.clear()
             button = buttons.pressed(token)
+            if button:
+                return button
+        return None
+
+    try:
+        button = wait_for(token, CFB_PROMPT_SECONDS + 5)
+        if button == "watch":
+            print("Got Watch replay. Playing the sample clip.")
+            close_url, close_token = buttons.new_callback() if CFB_CLOSE_BUTTON else (None, None)
+            show_clip(SAMPLE_VIDEO, None, 25, "HUDdle test clip", "The button works.", close_url)
+            if close_url:
+                print("Press ✕ on the clip to close it.")
+                if wait_for(close_token, 25) == "close":
+                    print("Got ✕. The clip closed.")
+                else:
+                    print("No ✕ press arrived (the clip ran to the end).")
+        elif button:
+            print(f"Got {button}. The button works.")
+        else:
+            print("No button press arrived. If you pressed one, this PC's firewall is probably blocking")
+            print(f"port {CFB_CALLBACK_PORT} (allow Python on Private networks), or PC_IP needs setting.")
     except KeyboardInterrupt:
         pass
     buttons.close()
-    if button == "watch":
-        print("Got Watch replay. Playing the sample clip.")
-        show_clip(SAMPLE_VIDEO, None, 25, "HUDdle test clip", "The button works.")
-    elif button:
-        print(f"Got {button}. The button works.")
-    else:
-        print("No button press arrived. If you pressed one, this PC's firewall is probably blocking")
-        print(f"port {CFB_CALLBACK_PORT} (allow Python on Private networks), or PC_IP needs setting.")
 
 
 def main():
@@ -995,15 +1048,19 @@ def main():
         return
 
     buttons = None
-    if CFB_ASK_FIRST and not args.no_ask:
+    ask_first = CFB_ASK_FIRST and not args.no_ask
+    if ask_first or CFB_CLOSE_BUTTON:
         try:
             buttons = ButtonServer(CFB_CALLBACK_PORT, PC_IP)
         except OSError as e:
             log(f"Couldn't listen for button presses on port {CFB_CALLBACK_PORT} ({e}); "
-                "clips will play without asking.")
-    replays = Replays(XClient(X_BEARER_TOKEN) if source == "x" else None, selected, buttons)
-    if buttons:
+                "clips will play without asking and without a ✕ button.")
+    replays = Replays(XClient(X_BEARER_TOKEN) if source == "x" else None, selected, buttons,
+                      ask_first, CFB_CLOSE_BUTTON)
+    if replays.ask_first:
         log(f"Each clip waits for its Watch replay button (button presses come back to {buttons.base}...)")
+    if replays.close_button:
+        log("Playing clips have a ✕ button to close them early.")
     clips_from = "X" if source == "x" else "ESPN"
     if selected:
         log(f"Selected mode: {games_text(len(selected))} ({', '.join(selected)}), clips from {clips_from}. Ctrl+C to stop.")
