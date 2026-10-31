@@ -13,3 +13,10 @@ SWID = None                   # "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"
 # Any other setting from the top of fantasy_overlay.py can be overridden here too, e.g.:
 # CYCLE_SECONDS = 10
 # POSITION = 8
+
+# ---- College football replays (cfb_replays.py) ----
+# X_BEARER_TOKEN = "AAAA..."  # your X API app's Bearer Token; keep it secret
+# CFB_MODE = "ranked"         # "ranked" = every game with a ranked team
+#                             # "selected" = only the games in CFB_GAME_IDS
+# CFB_GAME_IDS = []           # ESPN game ids or game links; run  python cfb_replays.py --list
+# CFB_TEAM_ACCOUNTS = {}      # e.g. {"AlabamaFTBL": "ALA"} to also pull clips from team accounts
