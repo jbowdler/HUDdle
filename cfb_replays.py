@@ -1,5 +1,5 @@
 """
-HUDdle college football replays - highlight clips from X, played over whatever is on your Android TV.
+HUDdle college football replays - highlight clips played over whatever is on your Android TV.
 Draws the popup with PiPup (maintained fork: https://github.com/mhoogenbosch/PiPup).
 
 Watches one of two sets of games:
@@ -8,11 +8,12 @@ Watches one of two sets of games:
 
 How it works:
   - ESPN's scoreboard says which of those games are live right now.
-  - While any are live, the script checks a list of X accounts (networks, conferences,
-    optionally teams) for new posts with video, using the X API.
-  - Each clip is matched to a game by the team names in the post (or by the team
-    account that posted it) and played in a PiPup popup on the TV.
-  - The TV streams the clip straight from X; nothing is downloaded to this PC.
+  - While any are live, the script looks for new highlight clips from one of two sources:
+      ESPN (default, free, no account): the highlight videos ESPN attaches to each game.
+      X (optional, needs X API access): new video posts from a list of X accounts,
+        matched to a game by the team names in the post or the team account that posted it.
+  - New clips play one at a time in a PiPup popup on the TV, which streams them
+    straight from ESPN or X; nothing is downloaded to this PC.
 
 Setup:
     python -m pip install requests
@@ -35,13 +36,16 @@ import requests
 # ======================= CONFIG =======================
 TV_IP = "192.168.1.50"        # your Android TV box IP (example)
 
-X_BEARER_TOKEN = None         # X API app Bearer Token (or set the X_BEARER_TOKEN environment variable)
-
 CFB_MODE = "ranked"           # "ranked" = every game with a ranked team
                               # "selected" = only the games in CFB_GAME_IDS
 CFB_GAME_IDS = []             # ESPN game ids or game page links (run --list to find them)
 CFB_RANK_CUTOFF = 25          # ranked mode: 10 = only games with a top-10 team
 
+CFB_SOURCE = "auto"           # where clips come from: "espn" (free, no account), "x" (needs
+                              # X_BEARER_TOKEN), or "auto" = X if a token is set, otherwise ESPN
+
+# ---- X only (CFB_SOURCE = "x") ----
+X_BEARER_TOKEN = None         # X API app Bearer Token (or set the X_BEARER_TOKEN environment variable)
 # X accounts to pull clips from (no @). Clips are matched to games by the team names in the post.
 CFB_X_ACCOUNTS = ["ESPNCFB", "CFBONFOX", "CBSSportsCFB", "BigTenNetwork",
                   "SECNetwork", "accnetwork", "Big12Conference"]
@@ -51,19 +55,21 @@ CFB_TEAM_ACCOUNTS = {}
 # Extra names to recognize in post text. Key = ESPN abbreviation, e.g. {"ALA": ["Bama", "Roll Tide"]}
 CFB_TEAM_ALIASES = {}
 
-CFB_POLL_SECONDS = 60         # how often to check ESPN and X while a watched game is live
-CFB_AFTER_FINAL_MINUTES = 15  # keep looking for clips this long after a game ends
-CFB_MAX_CLIP_SECONDS = 90     # skip longer videos (press conferences, hype videos)
-CFB_MAX_CLIP_AGE_MINUTES = 10 # drop clips that waited in the queue longer than this
 CFB_GAME_COOLDOWN_SECONDS = 120  # skip more clips from the same game for this long (same play, other account)
-CFB_MAX_BITRATE = 2_500_000   # best MP4 at or under this bitrate (about 720p); lower it if clips stutter
+X_COST_PER_POST = 0.005       # only used for the cost estimate printed in the console
+
+# ---- Both sources ----
+CFB_POLL_SECONDS = 60         # how often to check for clips while a watched game is live
+CFB_AFTER_FINAL_MINUTES = 15  # keep looking for clips this long after a game ends
+CFB_MAX_CLIP_SECONDS = 90     # skip longer videos (full-game recaps, press conferences)
+CFB_MAX_CLIP_AGE_MINUTES = 10 # drop clips that waited in the queue longer than this
+CFB_MAX_BITRATE = 2_500_000   # about 720p; lower it (e.g. 1_000_000 for SD) if clips stutter
 
 CFB_POSITION = 2              # where the clip sits: same 0-8 grid as POSITION (2 = bottom right)
 CFB_WIDTH = 640               # clip size on the TV
 CFB_HEIGHT = 360
 CFB_MUTED = True              # True keeps the game's sound; False plays the clip's audio
-CFB_SHOW_CAPTION = True       # score line and post text with the clip
-X_COST_PER_POST = 0.005       # only used for the cost estimate printed in the console
+CFB_SHOW_CAPTION = True       # score line and clip description with the clip
 # ======================================================
 
 # Keep your real values (especially X_BEARER_TOKEN) out of git: put any of the
@@ -83,6 +89,10 @@ TOP_25 = 25                   # ranks shown next to team names
 MAX_QUERY = 512               # X recent search query length limit
 SAMPLE_VIDEO = "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4"
 VERBOSE = False
+
+
+def games_text(n):
+    return f"{n} game" + ("" if n == 1 else "s")
 
 
 def log(msg):
@@ -177,15 +187,42 @@ def fetch_scoreboard(date=None):
     return games
 
 
-def fetch_game(game_id):
-    """One game by id, for picks that aren't on the FBS scoreboard (e.g. FCS)."""
+def fetch_summary(game_id):
     r = requests.get(f"{ESPN}/summary", params={"event": game_id}, timeout=15)
     r.raise_for_status()
-    comp = ((r.json().get("header") or {}).get("competitions") or [{}])[0]
+    return r.json()
+
+
+def fetch_game(game_id):
+    """One game by id, for picks that aren't on the FBS scoreboard (e.g. FCS)."""
+    comp = ((fetch_summary(game_id).get("header") or {}).get("competitions") or [{}])[0]
     g = game_from(game_id, comp, comp.get("status"))
     if not (g["away"] and g["home"]):
         raise ValueError("no teams in ESPN's response")
     return g
+
+
+def espn_clip(v):
+    """The playable clip in one of ESPN's game videos, or None if it's too long or has no MP4/HLS link."""
+    try:
+        seconds = float(v.get("duration") or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds > CFB_MAX_CLIP_SECONDS:
+        return None
+    links = v.get("links") or {}
+    source = links.get("source") or {}
+    hls = source.get("HLS") or {}
+    hd, sd = (source.get("HD") or {}).get("href"), source.get("href")
+    urls = [hd, sd] if CFB_MAX_BITRATE >= 2_000_000 else [sd, hd]      # HD is 720p
+    urls += [((links.get("mobile") or {}).get("source") or {}).get("href"),
+             (hls.get("HD") or {}).get("href"), hls.get("href")]
+    url = next((u for u in urls if isinstance(u, str) and u.startswith("http")
+                and re.search(r"\.(mp4|m3u8)(\?|$)", u)), None)
+    if not url:
+        return None
+    poster = v.get("thumbnail") or ((v.get("posterImages") or {}).get("default") or {}).get("href")
+    return {"url": url, "poster": poster if isinstance(poster, str) else None, "seconds": seconds or None}
 
 
 def is_ranked(g, cutoff=CFB_RANK_CUTOFF):
@@ -415,9 +452,10 @@ def hide():
 # ---------------- the watcher ----------------
 
 class Replays:
-    def __init__(self, x, selected=None):
-        self.x = x
+    def __init__(self, x=None, selected=None):
+        self.x = x                    # XClient for clips from X, or None for clips from ESPN
         self.selected = selected      # list of ESPN ids, or None for ranked mode
+        self.espn_seen = {}           # game id -> ESPN video ids already seen
         self.games = {}
         self.ended_at = {}
         self.warned = set()
@@ -475,11 +513,54 @@ class Replays:
         self.last_status = status
         if live:
             names = [matchup(self.games[g]) + (" (final)" if self.games[g]["state"] == "post" else "") for g in live]
-            log(f"Watching {status[0]} games; live now: " + ", ".join(names))
+            log(f"Watching {games_text(status[0])}; live now: " + ", ".join(names))
         else:
-            log(f"Watching {status[0]} games; none live - waiting")
+            log(f"Watching {games_text(status[0])}; none live - waiting")
 
-    # --- X ---
+    def poll(self, now):
+        if self.x:
+            self.poll_x(now)
+        else:
+            self.poll_espn(now)
+
+    def enqueue(self, clip, game, text, credit, now):
+        self.queue.append({**clip, "game": game["id"], "text": text, "credit": credit, "found": now})
+        log(f"Clip found: {matchup(game)} - {credit}: {text[:70]}")
+
+    # --- clips from ESPN ---
+    def poll_espn(self, now):
+        for gid in sorted(self.active(now)):
+            game = self.games[gid]
+            try:
+                videos = fetch_summary(gid).get("videos") or []
+            except (requests.RequestException, ValueError) as e:
+                log(f"ESPN error loading clips for {matchup(game)}: {e}")
+                continue
+            first_look = gid not in self.espn_seen
+            seen = self.espn_seen.setdefault(gid, set())
+            new = []
+            for v in videos:
+                vid = str(v.get("id") or v.get("headline") or "")
+                if vid and vid not in seen:
+                    seen.add(vid)
+                    new.append(v)
+            if first_look:
+                # Clips posted before we started watching this game (previews, earlier plays) aren't replayed
+                if new:
+                    debug(f"{matchup(game)}: {len(new)} earlier ESPN clips skipped")
+                continue
+            dates = [v.get("originalPublishDate") or v.get("published") or v.get("lastModified") for v in new]
+            new = ([v for _, v in sorted(zip(dates, new), key=lambda p: p[0])] if all(dates)
+                   else list(reversed(new)))           # ESPN lists newest first
+            for v in new:
+                text = clean_text(v.get("headline") or v.get("description"))
+                clip = espn_clip(v)
+                if clip:
+                    self.enqueue(clip, game, text, "ESPN", now)
+                else:
+                    debug(f"skip ESPN clip (too long or no playable link): {text[:60]}")
+
+    # --- clips from X ---
     def setup_x(self):
         handles = list(dict.fromkeys(list(CFB_X_ACCOUNTS) + list(CFB_TEAM_ACCOUNTS)))
         self.handles = self.x.lookup(handles)
@@ -554,8 +635,7 @@ class Replays:
             debug(f"skip @{handle}: another clip from {matchup(game)} just played (likely the same play)")
             return
         self.last_clip[game["id"]] = created
-        self.queue.append({**clip, "game": game["id"], "text": text, "handle": handle, "found": now})
-        log(f"Clip found: {matchup(game)} - @{handle}: {text[:70]}")
+        self.enqueue(clip, game, text, f"@{handle}", now)
 
     # --- TV ---
     def play_next(self, now):
@@ -564,17 +644,17 @@ class Replays:
         while self.queue:
             clip = self.queue.pop(0)
             if now - clip["found"] > CFB_MAX_CLIP_AGE_MINUTES * 60:
-                log(f"Dropped a clip that waited too long (@{clip['handle']})")
+                log(f"Dropped a clip that waited too long ({clip['credit']})")
                 continue
             seconds = math.ceil(clip["seconds"] or CFB_MAX_CLIP_SECONDS) + 4   # +4 s to load
             game = self.games.get(clip["game"])
             title = score_line(game) if game else ""
             text = clip["text"] if len(clip["text"]) <= 110 else clip["text"][:107] + "..."
-            message = f"{text}  - @{clip['handle']}"
+            message = f"{text}  - {clip['credit']}" if text else clip["credit"]
             if show_clip(clip["url"], clip["poster"], seconds, title, message):
                 self.busy_until = now + seconds
                 label = matchup(game) if game else "clip"
-                log(f"Playing: {label} from @{clip['handle']}  ({len(self.queue)} more queued)")
+                log(f"Playing: {label} from {clip['credit']}  ({len(self.queue)} more queued)")
             return
 
 
@@ -606,13 +686,14 @@ def test_video(url):
 
 def main():
     global VERBOSE
-    ap = argparse.ArgumentParser(description="College football replay clips from X on your TV.")
+    ap = argparse.ArgumentParser(description="College football replay clips on your TV.")
     ap.add_argument("--list", action="store_true", help="list this week's FBS games with their ESPN ids")
     ap.add_argument("--date", help="with --list: games on this date instead (YYYYMMDD)")
     ap.add_argument("--ranked", action="store_true",
                     help="ranked mode: watch every game with a ranked team (with --list: only those games)")
     ap.add_argument("--games", nargs="+", metavar="ID",
                     help="selected mode: watch only these ESPN game ids or links")
+    ap.add_argument("--source", choices=["espn", "x"], help="where clips come from (overrides CFB_SOURCE)")
     ap.add_argument("--test", nargs="?", const=SAMPLE_VIDEO, metavar="URL",
                     help="play a sample video on the TV and exit")
     ap.add_argument("--verbose", action="store_true", help="also explain why clips were skipped")
@@ -639,15 +720,23 @@ def main():
     elif mode != "ranked":
         print(f"CFB_MODE must be \"ranked\" or \"selected\", not \"{CFB_MODE}\".")
         return
-    if not X_BEARER_TOKEN:
-        print("Set X_BEARER_TOKEN in overlay_config.py (see the README's college football section).")
+    source = args.source or str(CFB_SOURCE).lower()
+    if source == "auto":
+        source = "x" if X_BEARER_TOKEN else "espn"
+    if source not in ("espn", "x"):
+        print(f"CFB_SOURCE must be \"espn\", \"x\" or \"auto\", not \"{CFB_SOURCE}\".")
+        return
+    if source == "x" and not X_BEARER_TOKEN:
+        print("Clips from X need X_BEARER_TOKEN in overlay_config.py (see the README's college football")
+        print("section), or use clips from ESPN instead: set CFB_SOURCE = \"espn\".")
         return
 
-    replays = Replays(XClient(X_BEARER_TOKEN), selected)
+    replays = Replays(XClient(X_BEARER_TOKEN) if source == "x" else None, selected)
+    clips_from = "X" if source == "x" else "ESPN"
     if selected:
-        log(f"Selected mode: {len(selected)} games ({', '.join(selected)}). Ctrl+C to stop.")
+        log(f"Selected mode: {games_text(len(selected))} ({', '.join(selected)}), clips from {clips_from}. Ctrl+C to stop.")
     else:
-        log(f"Ranked mode: games with a top-{CFB_RANK_CUTOFF} team. Ctrl+C to stop.")
+        log(f"Ranked mode: games with a top-{CFB_RANK_CUTOFF} team, clips from {clips_from}. Ctrl+C to stop.")
 
     next_poll = 0
     try:
@@ -657,7 +746,7 @@ def main():
                 next_poll = now + CFB_POLL_SECONDS
                 replays.refresh_games(now)
                 try:
-                    replays.poll_x(now)
+                    replays.poll(now)
                 except XAuthError as e:
                     log(f"{e}\nCheck X_BEARER_TOKEN and your X developer account's credits.")
                     break
@@ -668,8 +757,11 @@ def main():
     except KeyboardInterrupt:
         pass
     hide()
-    n = replays.x.posts_read
-    print(f"Stopped. X posts read this session: {n} (about ${n * X_COST_PER_POST:.2f}).")
+    if replays.x:
+        n = replays.x.posts_read
+        print(f"Stopped. X posts read this session: {n} (about ${n * X_COST_PER_POST:.2f}).")
+    else:
+        print("Stopped.")
 
 
 if __name__ == "__main__":
