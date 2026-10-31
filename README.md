@@ -280,10 +280,12 @@ Any of these can go in `overlay_config.py`.
 | `CFB_WIDTH`, `CFB_HEIGHT` | 640, 360 | Clip size |
 | `CFB_MUTED` | True | `False` plays the clip's sound over the game |
 | `CFB_SHOW_CAPTION` | True | Show the score line and clip description with the clip |
+| `CFB_CAPTION_TEXT_SIZE` | 13 | Caption text size on the clip (PiPup's default is 16) |
 | `CFB_PLAY_COUNT` | 2 | How many times each clip plays back to back (1 = once) |
 | `CFB_LOAD_SECONDS` | 3 | Time allowed for a clip to start. Raise it if the end of a clip gets cut off when it replays; lower it if there's a pause between plays |
 | `CFB_ASK_FIRST` | True | Show a **Watch replay** button first; the clip plays only if you press it |
 | `CFB_CLOSE_BUTTON` | True | Put a **✕** on the playing clip to close it early (and skip its replay) |
+| `CFB_CLOSE_BUTTON_SIZE` | 10 | Size of the **✕** |
 | `CFB_PROMPT_SECONDS` | 15 | How long the button stays up before the clip is skipped |
 | `CFB_PROMPT_THUMBNAIL` | True | Show a small still from the clip at the left of the button card |
 | `CFB_PROMPT_TEXT_SIZE` | 13 | Text size on the button card (PiPup's default is 16); smaller makes the card smaller |
@@ -313,6 +315,7 @@ Any of these can go in `overlay_config.py`.
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
 | `--test` shows nothing or a black box | Update to the latest release of the PiPup fork; video playback needs a recent version. Check the TV can reach the internet. |
 | Pressing **Watch replay** does nothing | Run `python cfb_replays.py --test-button`. If no press arrives, Windows Firewall is blocking port 8766 (allow Python on Private networks), or the auto-detected address is wrong: set `PC_IP` to the computer's LAN address. |
+| The clip's popup is bigger than `CFB_WIDTH` × `CFB_HEIGHT`, or the **✕** is too big | The caption row (with the **✕** at its end) is wider than the video, so the popup widens. Lower `CFB_CLOSE_BUTTON_SIZE` (e.g. 8) or `CFB_CAPTION_TEXT_SIZE` (e.g. 11), or set `CFB_SHOW_CAPTION = False`, which moves the **✕** under the video. |
 | The button card covers too much | Lower `CFB_PROMPT_TEXT_SIZE` (e.g. 11), set `CFB_PROMPT_THUMBNAIL = False`, or move it with `CFB_PROMPT_POSITION` (e.g. 0 for top right). |
 | The remote stops controlling the TV app | A **Watch replay** card or a clip with **✕** is up and has the remote. Press BACK (or **✕**) to close it, or wait for it to finish. Shorten `CFB_PROMPT_SECONDS`, set `CFB_ASK_FIRST = False` to play clips without asking, or set `CFB_CLOSE_BUTTON = False` so playing clips leave the remote alone. |
 | A clip replays after I closed it | Update PiPup to the latest release of the fork. The script checks PiPup's list of popups on screen before replaying, and older versions don't report it. **✕** works on any version. |

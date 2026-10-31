@@ -79,7 +79,8 @@ CFB_WIDTH = 640               # clip size on the TV
 CFB_HEIGHT = 360
 CFB_MUTED = True              # True keeps the game's sound; False plays the clip's audio
 CFB_SHOW_CAPTION = True       # score line and clip description with the clip
-CFB_PLAY_COUNT = 2            # how many times each clip plays back to back (1 = once)
+CFB_CAPTION_TEXT_SIZE = 13    # caption text size on the clip (PiPup's default is 16)
+CFB_PLAY_COUNT = 2           # how many times each clip plays back to back (1 = once)
 CFB_LOAD_SECONDS = 3          # time allowed for a clip to start playing; raise it if the end of a
                               # clip gets cut off by its replay, lower it if there's a pause between plays
 
@@ -90,7 +91,8 @@ CFB_PROMPT_TEXT_SIZE = 13     # text size on the button card (PiPup's default is
 CFB_PROMPT_POSITION = None    # where the button card sits (0-8 grid); None = same place as the clip
 CFB_CLOSE_BUTTON = True       # a ✕ button on the playing clip to close it (and skip its replay); while
                               # a clip with ✕ is up, the remote's OK and arrow keys go to it, not the TV app
-CFB_CALLBACK_PORT = 8766      # port on this PC the TV reports button presses to
+CFB_CLOSE_BUTTON_SIZE = 10    # size of the ✕ (PiPup's default button is much bigger and widens the clip)
+CFB_CALLBACK_PORT = 8766     # port on this PC the TV reports button presses to
 PC_IP = None                  # this PC's LAN address as the TV sees it; None = auto-detect
 # ======================================================
 
@@ -503,13 +505,17 @@ def show_clip(url, poster, seconds, title="", message="", close_callback=None):
     decoder = str(CFB_DECODER).lower()
     if decoder in ("hardware", "software"):
         video["softwareDecoder"] = decoder == "software"
-    card = {"id": CARD_ID, "duration": seconds, "position": CFB_POSITION,
+    card = {"id": CARD_ID, "duration": seconds, "position": CFB_POSITION, "padding": 8,
             "dismissScreensaver": False, "media": {"video": video}}
     if CFB_SHOW_CAPTION:
-        card.update({"title": title, "message": message})
+        size = int(CFB_CAPTION_TEXT_SIZE)
+        card.update({"title": title, "message": message, "titleSize": size, "messageSize": max(8, size - 2)})
     if close_callback:
-        # PiPup closes the popup itself when ✕ is pressed and tells us, so the replay can be skipped
+        # PiPup closes the popup itself when ✕ is pressed and tells us, so the replay can be skipped.
+        # Without buttonSize PiPup draws its big classic button, which widens the caption row and
+        # with it the whole popup and the video.
         card.update({"buttons": [{"id": "close", "label": "✕"}], "buttonsInline": True,
+                     "buttonSize": int(CFB_CLOSE_BUTTON_SIZE), "buttonCornerRadius": 4,
                      "callback": close_callback})
     return post_card(card)
 
@@ -888,13 +894,15 @@ class Replays:
             time.sleep(seconds)
 
     def show(self, cur):
-        title = cur["title"]
+        # A short caption, so the caption row (and the ✕ at its end) stays narrower than the video
+        title = cur.get("short_title") or cur["title"]
         if cur["plays"] > 1:
-            title = f"{title}   ({cur['play']}/{cur['plays']})".strip()
+            title = f"{title}  ({cur['play']}/{cur['plays']})".strip()
+        message = f"{shorten(cur['text'], 60)} - {cur['credit']}" if cur.get("text") else cur["credit"]
         # Keep the popup up a few seconds past the replay time, so a late loop tick still finds it
         # on screen (and doesn't mistake it for closed); the replay replaces it anyway
         linger = 6 if cur["play"] < cur["plays"] else 1
-        return show_clip(cur["url"], cur["poster"], cur["play_time"] + linger, title, cur["message"],
+        return show_clip(cur["url"], cur["poster"], cur["play_time"] + linger, title, message,
                          cur.get("close_url"))
 
     def replay(self, cur, now):
