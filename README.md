@@ -164,7 +164,8 @@ ESPN scoreboard ──> which watched games are live ──> new highlight clips
 - **Clips from X are optional.** If you have X API access, the script can pull video posts from network, conference and team accounts instead, which is usually faster and covers more games. See [Clips from X](#clips-from-x-optional).
 - **Only live games are checked**, from kickoff until 15 minutes after the final.
 - **The TV streams each clip straight from ESPN or X**, at about 720p by default. Nothing is downloaded to your computer.
-- **Clips queue up** and play one at a time.
+- **You choose which clips to watch.** When a clip is ready, a small card shows the score, what happened and a **Watch replay** button, so it doesn't cover a play in the game you're watching. Press OK to watch, or ignore it (or press BACK or **Skip**) and it goes away after 15 seconds. While the card is up, the remote's OK and arrow keys go to it instead of the TV app. Set `CFB_ASK_FIRST = False` to play clips without asking.
+- **Each clip plays twice in a row**, then the next one starts. Clips queue up and play one at a time. The popup blinks briefly between the two plays because it reopens to restart the clip. Set `CFB_PLAY_COUNT = 1` to play each clip once.
 
 ### 1. Configure
 
@@ -186,6 +187,14 @@ python cfb_replays.py --test
 A 15-second sample video should play in the bottom-right corner. If it doesn't, see [Troubleshooting](#troubleshooting).
 
 If the sample stutters, try `python cfb_replays.py --test --decoder hardware`. On onn and other boxes with Amlogic chips, PiPup decodes popup video in software by default, which can stutter whatever the clip's size. If the hardware decoder plays smoothly, set `CFB_DECODER = "hardware"` in `overlay_config.py`. The sample is always 720p; `CFB_MAX_BITRATE` only affects real clips.
+
+Then check the **Watch replay** button:
+
+```
+python cfb_replays.py --test-button
+```
+
+Press **Watch replay** on the TV and the console should say `Got Watch replay` and play the sample. The TV reports button presses to this computer on port 8766, so on first run allow Python through Windows Firewall on **Private networks** (the same as for the fantasy bar). If nothing arrives, see [Troubleshooting](#troubleshooting).
 
 ### 3. Pick games (selected mode)
 
@@ -217,9 +226,10 @@ Or skip the config and pass them for one run: `python cfb_replays.py --games 401
 python cfb_replays.py               # uses CFB_MODE from overlay_config.py
 python cfb_replays.py --ranked      # ranked mode for this run
 python cfb_replays.py --verbose     # also explain why clips were skipped
+python cfb_replays.py --no-ask      # play clips without the Watch replay button
 ```
 
-The console shows which watched games are live, each clip it finds, and what's playing. Press **Ctrl+C** to stop and the popup disappears.
+The console shows which watched games are live, each clip it finds, and what's playing. Each clip waits for its **Watch replay** button; clips found meanwhile queue up behind it, and the card says how many are waiting. Press **Ctrl+C** to stop and the popup disappears.
 
 When the script starts watching a game, clips ESPN already posted (previews, earlier plays) are skipped; only clips posted after that are played. Start it before kickoff to catch everything.
 
@@ -269,6 +279,13 @@ Any of these can go in `overlay_config.py`.
 | `CFB_WIDTH`, `CFB_HEIGHT` | 640, 360 | Clip size |
 | `CFB_MUTED` | True | `False` plays the clip's sound over the game |
 | `CFB_SHOW_CAPTION` | True | Show the score line and clip description with the clip |
+| `CFB_PLAY_COUNT` | 2 | How many times each clip plays back to back (1 = once) |
+| `CFB_LOAD_SECONDS` | 3 | Time allowed for a clip to start. Raise it if the end of a clip gets cut off when it replays; lower it if there's a pause between plays |
+| `CFB_ASK_FIRST` | True | Show a **Watch replay** button first; the clip plays only if you press it |
+| `CFB_PROMPT_SECONDS` | 15 | How long the button stays up before the clip is skipped |
+| `CFB_PROMPT_THUMBNAIL` | True | Show the clip's still image on the button card |
+| `CFB_CALLBACK_PORT` | 8766 | Port on this computer the TV reports button presses to |
+| `PC_IP` | None | Computer's IP as seen by the TV; None auto-detects (shared with the fantasy bar) |
 | `X_BEARER_TOKEN` | None | X only: your X API Bearer Token (or set the `X_BEARER_TOKEN` environment variable) |
 | `CFB_X_ACCOUNTS` | 7 national accounts | X only: handles to pull clips from (no @) |
 | `CFB_TEAM_ACCOUNTS` | `{}` | X only: team handles mapped to ESPN abbreviations |
@@ -291,6 +308,10 @@ Any of these can go in `overlay_config.py`.
 | No **Wireless debugging** option on the TV | Older Android TV builds don't have it. Turn on **USB debugging** in Developer options instead, then try `adb connect 192.168.1.50:5555` and accept the prompt on the TV. This works on many boxes but hasn't been tested with HUDdle. |
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
 | `--test` shows nothing or a black box | Update to the latest release of the PiPup fork; video playback needs a recent version. Check the TV can reach the internet. |
+| Pressing **Watch replay** does nothing | Run `python cfb_replays.py --test-button`. If no press arrives, Windows Firewall is blocking port 8766 (allow Python on Private networks), or the auto-detected address is wrong: set `PC_IP` to the computer's LAN address. |
+| The remote stops controlling the TV app | A **Watch replay** card is up and has the remote. Press BACK to close it, or wait for it to time out. Shorten `CFB_PROMPT_SECONDS`, or set `CFB_ASK_FIRST = False` to play clips without asking. |
+| `Couldn't listen for button presses on port 8766` | Another program (or a second copy of the script) is using the port. Close it or change `CFB_CALLBACK_PORT`. Until then, clips play without asking. |
+| End of a clip is cut off when it replays, or there's a pause between plays | Raise or lower `CFB_LOAD_SECONDS` (default 3). The replay starts that many seconds after the clip's length, to allow for loading. |
 | Replay clips stutter | First set `CFB_DECODER = "hardware"` (compare with `--test --decoder hardware`): onn and other Amlogic boxes decode popups in software by default. If they still stutter, lower `CFB_MAX_BITRATE`; the console shows each clip's size as it plays, e.g. `[640x360, 832 kbps]`. If the TV picture behind a clip freezes when it closes, set `CFB_DECODER` back to `"auto"`. |
 | `X rejected the request (401)` | `X_BEARER_TOKEN` is wrong. Copy the Bearer Token from your app's **Keys and tokens** again. |
 | `X API error 402` or a credits message | Your X developer account is out of credit. |
@@ -307,6 +328,7 @@ Any of these can go in `overlay_config.py`.
 - PiPup's port 7979 on the TV also has no login, so anyone on your network can put a popup on your TV. Keep both on a trusted home network, not a public or shared one.
 - Your X Bearer Token stays in `overlay_config.py` and is only sent to X. Anyone who has it can spend your X credit.
 - Replay clips stream from ESPN's or X's servers directly to the TV.
+- While `cfb_replays.py` runs, it listens on port 8766 for **Watch replay** presses from the TV. Each card uses a new random link, so other devices can't fake a press for it.
 
 ## Disclaimer
 
