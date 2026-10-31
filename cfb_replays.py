@@ -25,11 +25,17 @@ Setup:
 
 import argparse
 import html
+import json
 import math
 import os
+import queue
 import re
+import secrets
+import socket
+import threading
 import time
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import requests
 
@@ -76,6 +82,12 @@ CFB_SHOW_CAPTION = True       # score line and clip description with the clip
 CFB_PLAY_COUNT = 2            # how many times each clip plays back to back (1 = once)
 CFB_LOAD_SECONDS = 3          # time allowed for a clip to start playing; raise it if the end of a
                               # clip gets cut off by its replay, lower it if there's a pause between plays
+
+CFB_ASK_FIRST = True          # show a "Watch replay" button first; the clip plays only if you press it
+CFB_PROMPT_SECONDS = 15       # how long the button stays up; ignoring it (or pressing BACK) skips the clip
+CFB_PROMPT_THUMBNAIL = True   # show the clip's still image with the button
+CFB_CALLBACK_PORT = 8766      # port on this PC the TV reports button presses to
+PC_IP = None                  # this PC's LAN address as the TV sees it; None = auto-detect
 # ======================================================
 
 # Keep your real values (especially X_BEARER_TOKEN) out of git: put any of the
@@ -492,12 +504,86 @@ def hide():
         pass
 
 
+def show_prompt(cur, seconds, callback):
+    """The "Watch replay" button. While it's up, the remote's OK and arrow keys go to it, not the TV app;
+    BACK closes it."""
+    card = {"id": CARD_ID, "duration": seconds, "position": CFB_POSITION, "dismissScreensaver": False,
+            "title": cur["title"] or "Replay available", "message": cur["message"],
+            "showProgress": True, "callback": callback,
+            "buttons": [{"id": "watch", "label": "Watch replay"}, {"id": "skip", "label": "Skip"}]}
+    if CFB_PROMPT_THUMBNAIL and cur.get("poster"):
+        card["media"] = {"image": {"uri": cur["poster"], "width": 320}}
+    return post_card(card)
+
+
+def detect_pc_ip():
+    # The address this PC uses to reach the TV (no traffic is actually sent)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((TV_IP, 7979))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+class ButtonServer:
+    """Receives PiPup's button presses: POST /pipup/<token> with {"button": "watch", ...}."""
+
+    def __init__(self, port, pc_ip=None):
+        self.presses = queue.Queue()
+        self.wake = threading.Event()
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                try:
+                    body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                    data = json.loads(body or b"{}")
+                except ValueError:
+                    data = {}
+                m = re.fullmatch(r"/pipup/([\w-]+)", self.path)
+                if m and isinstance(data, dict):
+                    server.presses.put((m.group(1), str(data.get("button", ""))))
+                    server.wake.set()
+                self.send_response(204 if m else 404)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        pc_ip = pc_ip or detect_pc_ip()
+        self.http = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        self.base = f"http://{pc_ip}:{self.http.server_address[1]}/pipup/"
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+    def new_callback(self):
+        """A fresh single-use callback URL and its token."""
+        token = secrets.token_urlsafe(12)
+        return self.base + token, token
+
+    def pressed(self, token):
+        """The button pressed on the prompt with this token, if any (presses for older prompts are dropped)."""
+        found = None
+        while True:
+            try:
+                t, button = self.presses.get_nowait()
+            except queue.Empty:
+                return found
+            if t == token:
+                found = button
+
+    def close(self):
+        self.http.shutdown()
+
+
 # ---------------- the watcher ----------------
 
 class Replays:
-    def __init__(self, x=None, selected=None):
+    def __init__(self, x=None, selected=None, buttons=None):
         self.x = x                    # XClient for clips from X, or None for clips from ESPN
         self.selected = selected      # list of ESPN ids, or None for ranked mode
+        self.buttons = buttons        # ButtonServer to ask before playing, or None to just play
+        self.prompt = None            # the clip being offered with a "Watch replay" button
         self.espn_seen = {}           # game id -> ESPN video ids already seen
         self.games = {}
         self.ended_at = {}
@@ -689,6 +775,19 @@ class Replays:
                 self.replay(cur, now)
                 return
             self.current = None
+        if self.prompt:
+            offer = self.prompt
+            button = self.buttons.pressed(offer["token"])
+            if button == "watch":
+                self.prompt = None
+                self.start(offer, now)
+                return
+            if button or now >= offer["expires"]:
+                # Skip pressed, or ignored / closed with BACK (PiPup doesn't report those)
+                self.prompt = None
+                log(f"Skipped: {offer['label']}" if button else f"Not watched: {offer['label']}")
+            else:
+                return
         if now < self.busy_until:
             return
         while self.queue:
@@ -696,22 +795,43 @@ class Replays:
             if now - clip["found"] > CFB_MAX_CLIP_AGE_MINUTES * 60:
                 log(f"Dropped a clip that waited too long ({clip['credit']})")
                 continue
-            # One play = load time + the clip; the popup itself stays up a second longer so a
-            # replay can take over before it closes
-            play_time = math.ceil(clip["seconds"] or CFB_MAX_CLIP_SECONDS) + CFB_LOAD_SECONDS
-            plays = max(1, int(CFB_PLAY_COUNT))
             game = self.games.get(clip["game"])
             text = clip["text"] if len(clip["text"]) <= 110 else clip["text"][:107] + "..."
             cur = {**clip, "title": score_line(game) if game else "",
                    "message": f"{text}  - {clip['credit']}" if text else clip["credit"],
-                   "play": 1, "plays": plays, "play_time": play_time, "next_at": now + play_time}
-            if self.show(cur):
-                self.current = cur
-                self.busy_until = now + play_time * plays + 1
-                label = matchup(game) if game else "clip"
-                log(f"Playing: {label} from {clip['credit']} [{clip.get('quality', '?')}]  "
-                    f"({len(self.queue)} more queued)")
+                   "label": matchup(game) if game else "clip"}
+            if self.buttons:
+                self.ask(cur, now)
+            else:
+                self.start(cur, now)
             return
+
+    def ask(self, cur, now):
+        url, token = self.buttons.new_callback()
+        offer = dict(cur, message=cur["message"] + (f"   ({len(self.queue)} more waiting)" if self.queue else ""))
+        if show_prompt(offer, CFB_PROMPT_SECONDS, url):
+            self.prompt = {**cur, "token": token, "expires": now + CFB_PROMPT_SECONDS + 1}
+            log(f"Replay ready: {cur['label']} - {cur['text'][:60]}  (waiting for the button)")
+
+    def start(self, cur, now):
+        # One play = load time + the clip; the popup itself stays up a second longer so a
+        # replay can take over before it closes
+        play_time = math.ceil(cur["seconds"] or CFB_MAX_CLIP_SECONDS) + CFB_LOAD_SECONDS
+        plays = max(1, int(CFB_PLAY_COUNT))
+        cur = {**cur, "play": 1, "plays": plays, "play_time": play_time, "next_at": now + play_time}
+        if self.show(cur):
+            self.current = cur
+            self.busy_until = now + play_time * plays + 1
+            log(f"Playing: {cur['label']} from {cur['credit']} [{cur.get('quality', '?')}]  "
+                f"({len(self.queue)} more queued)")
+
+    def sleep(self, seconds):
+        # Wakes early when a button is pressed, so the clip starts right away
+        if self.buttons:
+            self.buttons.wake.wait(seconds)
+            self.buttons.wake.clear()
+        else:
+            time.sleep(seconds)
 
     def show(self, cur):
         title = cur["title"]
@@ -769,6 +889,37 @@ def test_video(url):
         print(f"TV reports a playback error: {last['mediaError']}")
 
 
+def test_button():
+    try:
+        buttons = ButtonServer(CFB_CALLBACK_PORT, PC_IP)
+    except OSError as e:
+        print(f"Couldn't listen for button presses on port {CFB_CALLBACK_PORT}: {e}")
+        return
+    print(f"Showing a \"Watch replay\" button on the TV at {TV_IP}. The TV reports presses to {buttons.base}...")
+    url, token = buttons.new_callback()
+    offer = {"title": "HUDdle test", "message": "Press Watch replay to play a sample clip", "poster": None}
+    if not show_prompt(offer, CFB_PROMPT_SECONDS, url):
+        return
+    print(f"Press Watch replay (or Skip) on the TV within {CFB_PROMPT_SECONDS} seconds.")
+    button, deadline = None, time.time() + CFB_PROMPT_SECONDS + 5
+    try:
+        while button is None and time.time() < deadline:
+            buttons.wake.wait(1)
+            buttons.wake.clear()
+            button = buttons.pressed(token)
+    except KeyboardInterrupt:
+        pass
+    buttons.close()
+    if button == "watch":
+        print("Got Watch replay. Playing the sample clip.")
+        show_clip(SAMPLE_VIDEO, None, 25, "HUDdle test clip", "The button works.")
+    elif button:
+        print(f"Got {button}. The button works.")
+    else:
+        print("No button press arrived. If you pressed one, this PC's firewall is probably blocking")
+        print(f"port {CFB_CALLBACK_PORT} (allow Python on Private networks), or PC_IP needs setting.")
+
+
 def main():
     global VERBOSE, CFB_DECODER
     ap = argparse.ArgumentParser(description="College football replay clips on your TV.")
@@ -783,6 +934,9 @@ def main():
                     help="how the TV decodes clips (overrides CFB_DECODER)")
     ap.add_argument("--test", nargs="?", const=SAMPLE_VIDEO, metavar="URL",
                     help="play a sample video on the TV and exit")
+    ap.add_argument("--test-button", action="store_true",
+                    help="show a Watch replay button on the TV and check the press reaches this PC")
+    ap.add_argument("--no-ask", action="store_true", help="play clips without asking first (overrides CFB_ASK_FIRST)")
     ap.add_argument("--verbose", action="store_true", help="also explain why clips were skipped")
     args = ap.parse_args()
     VERBOSE = args.verbose
@@ -790,6 +944,8 @@ def main():
 
     if args.test:
         return test_video(args.test)
+    if args.test_button:
+        return test_button()
     if args.list:
         try:
             return list_games(args.date, args.ranked)
@@ -819,7 +975,16 @@ def main():
         print("section), or use clips from ESPN instead: set CFB_SOURCE = \"espn\".")
         return
 
-    replays = Replays(XClient(X_BEARER_TOKEN) if source == "x" else None, selected)
+    buttons = None
+    if CFB_ASK_FIRST and not args.no_ask:
+        try:
+            buttons = ButtonServer(CFB_CALLBACK_PORT, PC_IP)
+        except OSError as e:
+            log(f"Couldn't listen for button presses on port {CFB_CALLBACK_PORT} ({e}); "
+                "clips will play without asking.")
+    replays = Replays(XClient(X_BEARER_TOKEN) if source == "x" else None, selected, buttons)
+    if buttons:
+        log(f"Each clip waits for its Watch replay button (button presses come back to {buttons.base}...)")
     clips_from = "X" if source == "x" else "ESPN"
     if selected:
         log(f"Selected mode: {games_text(len(selected))} ({', '.join(selected)}), clips from {clips_from}. Ctrl+C to stop.")
@@ -841,10 +1006,12 @@ def main():
                 except (XError, requests.RequestException) as e:
                     log(str(e))
             replays.play_next(now)
-            time.sleep(1)
+            replays.sleep(1)
     except KeyboardInterrupt:
         pass
     hide()
+    if buttons:
+        buttons.close()
     if replays.x:
         n = replays.x.posts_read
         print(f"Stopped. X posts read this session: {n} (about ${n * X_COST_PER_POST:.2f}).")
