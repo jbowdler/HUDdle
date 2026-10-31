@@ -73,6 +73,9 @@ CFB_WIDTH = 640               # clip size on the TV
 CFB_HEIGHT = 360
 CFB_MUTED = True              # True keeps the game's sound; False plays the clip's audio
 CFB_SHOW_CAPTION = True       # score line and clip description with the clip
+CFB_PLAY_COUNT = 2            # how many times each clip plays back to back (1 = once)
+CFB_LOAD_SECONDS = 3          # time allowed for a clip to start playing; raise it if the end of a
+                              # clip gets cut off by its replay, lower it if there's a pause between plays
 # ======================================================
 
 # Keep your real values (especially X_BEARER_TOKEN) out of git: put any of the
@@ -506,6 +509,7 @@ class Replays:
         self.last_x_poll = 0
         self.queue = []
         self.busy_until = 0
+        self.current = None           # the clip on screen, while it still has plays left
         self.seen_media = set()
         self.last_clip = {}           # game id -> time of the last clip we kept
         self.last_status = None
@@ -679,6 +683,12 @@ class Replays:
 
     # --- TV ---
     def play_next(self, now):
+        cur = self.current
+        if cur and now >= cur["next_at"]:
+            if cur["play"] < cur["plays"]:
+                self.replay(cur, now)
+                return
+            self.current = None
         if now < self.busy_until:
             return
         while self.queue:
@@ -686,17 +696,37 @@ class Replays:
             if now - clip["found"] > CFB_MAX_CLIP_AGE_MINUTES * 60:
                 log(f"Dropped a clip that waited too long ({clip['credit']})")
                 continue
-            seconds = math.ceil(clip["seconds"] or CFB_MAX_CLIP_SECONDS) + 4   # +4 s to load
+            # One play = load time + the clip; the popup itself stays up a second longer so a
+            # replay can take over before it closes
+            play_time = math.ceil(clip["seconds"] or CFB_MAX_CLIP_SECONDS) + CFB_LOAD_SECONDS
+            plays = max(1, int(CFB_PLAY_COUNT))
             game = self.games.get(clip["game"])
-            title = score_line(game) if game else ""
             text = clip["text"] if len(clip["text"]) <= 110 else clip["text"][:107] + "..."
-            message = f"{text}  - {clip['credit']}" if text else clip["credit"]
-            if show_clip(clip["url"], clip["poster"], seconds, title, message):
-                self.busy_until = now + seconds
+            cur = {**clip, "title": score_line(game) if game else "",
+                   "message": f"{text}  - {clip['credit']}" if text else clip["credit"],
+                   "play": 1, "plays": plays, "play_time": play_time, "next_at": now + play_time}
+            if self.show(cur):
+                self.current = cur
+                self.busy_until = now + play_time * plays + 1
                 label = matchup(game) if game else "clip"
                 log(f"Playing: {label} from {clip['credit']} [{clip.get('quality', '?')}]  "
                     f"({len(self.queue)} more queued)")
             return
+
+    def show(self, cur):
+        title = cur["title"]
+        if cur["plays"] > 1:
+            title = f"{title}   ({cur['play']}/{cur['plays']})".strip()
+        return show_clip(cur["url"], cur["poster"], cur["play_time"] + 1, title, cur["message"])
+
+    def replay(self, cur, now):
+        # PiPup keeps a video playing when the same popup is sent again, so close it and
+        # open it fresh to start the clip from the top
+        cur["play"] += 1
+        cur["next_at"] = now + cur["play_time"]
+        hide()
+        if self.show(cur):
+            debug(f"Replaying clip ({cur['play']}/{cur['plays']})")
 
 
 # ---------------- commands ----------------

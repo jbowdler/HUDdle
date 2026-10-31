@@ -164,7 +164,7 @@ ESPN scoreboard ──> which watched games are live ──> new highlight clips
 - **Clips from X are optional.** If you have X API access, the script can pull video posts from network, conference and team accounts instead, which is usually faster and covers more games. See [Clips from X](#clips-from-x-optional).
 - **Only live games are checked**, from kickoff until 15 minutes after the final.
 - **The TV streams each clip straight from ESPN or X**, at about 720p by default. Nothing is downloaded to your computer.
-- **Clips queue up** and play one at a time.
+- **Each clip plays twice in a row**, then the next one starts. Clips queue up and play one at a time. The popup blinks briefly between the two plays because it reopens to restart the clip. Set `CFB_PLAY_COUNT = 1` to play each clip once.
 
 ### 1. Configure
 
@@ -269,6 +269,8 @@ Any of these can go in `overlay_config.py`.
 | `CFB_WIDTH`, `CFB_HEIGHT` | 640, 360 | Clip size |
 | `CFB_MUTED` | True | `False` plays the clip's sound over the game |
 | `CFB_SHOW_CAPTION` | True | Show the score line and clip description with the clip |
+| `CFB_PLAY_COUNT` | 2 | How many times each clip plays back to back (1 = once) |
+| `CFB_LOAD_SECONDS` | 3 | Time allowed for a clip to start. Raise it if the end of a clip gets cut off when it replays; lower it if there's a pause between plays |
 | `X_BEARER_TOKEN` | None | X only: your X API Bearer Token (or set the `X_BEARER_TOKEN` environment variable) |
 | `CFB_X_ACCOUNTS` | 7 national accounts | X only: handles to pull clips from (no @) |
 | `CFB_TEAM_ACCOUNTS` | `{}` | X only: team handles mapped to ESPN abbreviations |
@@ -291,6 +293,7 @@ Any of these can go in `overlay_config.py`.
 | No **Wireless debugging** option on the TV | Older Android TV builds don't have it. Turn on **USB debugging** in Developer options instead, then try `adb connect 192.168.1.50:5555` and accept the prompt on the TV. This works on many boxes but hasn't been tested with HUDdle. |
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
 | `--test` shows nothing or a black box | Update to the latest release of the PiPup fork; video playback needs a recent version. Check the TV can reach the internet. |
+| End of a clip is cut off when it replays, or there's a pause between plays | Raise or lower `CFB_LOAD_SECONDS` (default 3). The replay starts that many seconds after the clip's length, to allow for loading. |
 | Replay clips stutter | First set `CFB_DECODER = "hardware"` (compare with `--test --decoder hardware`): onn and other Amlogic boxes decode popups in software by default. If they still stutter, lower `CFB_MAX_BITRATE`; the console shows each clip's size as it plays, e.g. `[640x360, 832 kbps]`. If the TV picture behind a clip freezes when it closes, set `CFB_DECODER` back to `"auto"`. |
 | `X rejected the request (401)` | `X_BEARER_TOKEN` is wrong. Copy the Bearer Token from your app's **Keys and tokens** again. |
 | `X API error 402` or a credits message | Your X developer account is out of credit. |
