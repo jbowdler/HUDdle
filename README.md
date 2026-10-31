@@ -164,7 +164,7 @@ ESPN scoreboard ──> which watched games are live ──> new highlight clips
 - **Clips from X are optional.** If you have X API access, the script can pull video posts from network, conference and team accounts instead, which is usually faster and covers more games. See [Clips from X](#clips-from-x-optional).
 - **Only live games are checked**, from kickoff until 15 minutes after the final.
 - **The TV streams each clip straight from ESPN or X**, at about 720p by default. Nothing is downloaded to your computer.
-- **You choose which clips to watch.** When a clip is ready, a small card shows the score, what happened and a **Watch replay** button, so it doesn't cover a play in the game you're watching. Press OK to watch, or ignore it (or press BACK or **Skip**) and it goes away after 15 seconds. While the card is up, the remote's OK and arrow keys go to it instead of the TV app. Set `CFB_ASK_FIRST = False` to play clips without asking.
+- **You choose which clips to watch.** When a clip is ready, a small one-row card shows a thumbnail, the score, what happened, and **Watch replay** and **✕** buttons, so a clip never covers a play in the game you're watching. Press OK to watch. Ignore it, or press BACK or **✕**, and it goes away after 15 seconds. While the card is up, the remote's OK and arrow keys go to it instead of the TV app. Set `CFB_ASK_FIRST = False` to play clips without asking.
 - **Each clip plays twice in a row**, then the next one starts. Clips queue up and play one at a time. The popup blinks briefly between the two plays because it reopens to restart the clip. Set `CFB_PLAY_COUNT = 1` to play each clip once.
 
 ### 1. Configure
@@ -283,7 +283,9 @@ Any of these can go in `overlay_config.py`.
 | `CFB_LOAD_SECONDS` | 3 | Time allowed for a clip to start. Raise it if the end of a clip gets cut off when it replays; lower it if there's a pause between plays |
 | `CFB_ASK_FIRST` | True | Show a **Watch replay** button first; the clip plays only if you press it |
 | `CFB_PROMPT_SECONDS` | 15 | How long the button stays up before the clip is skipped |
-| `CFB_PROMPT_THUMBNAIL` | True | Show the clip's still image on the button card |
+| `CFB_PROMPT_THUMBNAIL` | True | Show a small still from the clip at the left of the button card |
+| `CFB_PROMPT_TEXT_SIZE` | 13 | Text size on the button card (PiPup's default is 16); smaller makes the card smaller |
+| `CFB_PROMPT_POSITION` | None | Where the button card sits (same grid as `POSITION`); None puts it where the clip plays |
 | `CFB_CALLBACK_PORT` | 8766 | Port on this computer the TV reports button presses to |
 | `PC_IP` | None | Computer's IP as seen by the TV; None auto-detects (shared with the fantasy bar) |
 | `X_BEARER_TOKEN` | None | X only: your X API Bearer Token (or set the `X_BEARER_TOKEN` environment variable) |
@@ -309,6 +311,7 @@ Any of these can go in `overlay_config.py`.
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
 | `--test` shows nothing or a black box | Update to the latest release of the PiPup fork; video playback needs a recent version. Check the TV can reach the internet. |
 | Pressing **Watch replay** does nothing | Run `python cfb_replays.py --test-button`. If no press arrives, Windows Firewall is blocking port 8766 (allow Python on Private networks), or the auto-detected address is wrong: set `PC_IP` to the computer's LAN address. |
+| The button card covers too much | Lower `CFB_PROMPT_TEXT_SIZE` (e.g. 11), set `CFB_PROMPT_THUMBNAIL = False`, or move it with `CFB_PROMPT_POSITION` (e.g. 0 for top right). |
 | The remote stops controlling the TV app | A **Watch replay** card is up and has the remote. Press BACK to close it, or wait for it to time out. Shorten `CFB_PROMPT_SECONDS`, or set `CFB_ASK_FIRST = False` to play clips without asking. |
 | `Couldn't listen for button presses on port 8766` | Another program (or a second copy of the script) is using the port. Close it or change `CFB_CALLBACK_PORT`. Until then, clips play without asking. |
 | End of a clip is cut off when it replays, or there's a pause between plays | Raise or lower `CFB_LOAD_SECONDS` (default 3). The replay starts that many seconds after the clip's length, to allow for loading. |
