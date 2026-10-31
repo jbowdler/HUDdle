@@ -185,6 +185,8 @@ python cfb_replays.py --test
 
 A 15-second sample video should play in the bottom-right corner. If it doesn't, see [Troubleshooting](#troubleshooting).
 
+If the sample stutters, try `python cfb_replays.py --test --decoder hardware`. On onn and other boxes with Amlogic chips, PiPup decodes popup video in software by default, which can stutter whatever the clip's size. If the hardware decoder plays smoothly, set `CFB_DECODER = "hardware"` in `overlay_config.py`. The sample is always 720p; `CFB_MAX_BITRATE` only affects real clips.
+
 ### 3. Pick games (selected mode)
 
 List this week's FBS games with their ESPN ids. Games with a ranked team are marked with `*`:
@@ -261,7 +263,8 @@ Any of these can go in `overlay_config.py`.
 | `CFB_AFTER_FINAL_MINUTES` | 15 | Keep looking for clips this long after a game ends |
 | `CFB_MAX_CLIP_SECONDS` | 90 | Skip longer videos (full-game recaps, press conferences) |
 | `CFB_MAX_CLIP_AGE_MINUTES` | 10 | Drop clips that waited in the queue longer than this |
-| `CFB_MAX_BITRATE` | 2500000 | About 720p; lower it to `1000000` for SD if clips stutter |
+| `CFB_MAX_BITRATE` | 3000000 | About 720p; lower it to `1000000` for the smallest version of each clip |
+| `CFB_DECODER` | `"auto"` | How the TV decodes clips: `"hardware"`, `"software"`, or `"auto"` (PiPup decides; software on Amlogic boxes like the onn) |
 | `CFB_POSITION` | 2 | Where the clip sits (same grid as `POSITION`; 2 is bottom right) |
 | `CFB_WIDTH`, `CFB_HEIGHT` | 640, 360 | Clip size |
 | `CFB_MUTED` | True | `False` plays the clip's sound over the game |
@@ -288,7 +291,7 @@ Any of these can go in `overlay_config.py`.
 | No **Wireless debugging** option on the TV | Older Android TV builds don't have it. Turn on **USB debugging** in Developer options instead, then try `adb connect 192.168.1.50:5555` and accept the prompt on the TV. This works on many boxes but hasn't been tested with HUDdle. |
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
 | `--test` shows nothing or a black box | Update to the latest release of the PiPup fork; video playback needs a recent version. Check the TV can reach the internet. |
-| Replay clips stutter | Lower `CFB_MAX_BITRATE` to `1000000` (SD). Some boxes decode the popup in software. |
+| Replay clips stutter | First set `CFB_DECODER = "hardware"` (compare with `--test --decoder hardware`): onn and other Amlogic boxes decode popups in software by default. If they still stutter, lower `CFB_MAX_BITRATE`; the console shows each clip's size as it plays, e.g. `[640x360, 832 kbps]`. If the TV picture behind a clip freezes when it closes, set `CFB_DECODER` back to `"auto"`. |
 | `X rejected the request (401)` | `X_BEARER_TOKEN` is wrong. Copy the Bearer Token from your app's **Keys and tokens** again. |
 | `X API error 402` or a credits message | Your X developer account is out of credit. |
 | `X account not found` | A handle in `CFB_X_ACCOUNTS` or `CFB_TEAM_ACCOUNTS` is misspelled or the account no longer exists. |

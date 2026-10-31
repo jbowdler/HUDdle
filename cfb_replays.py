@@ -63,7 +63,10 @@ CFB_POLL_SECONDS = 60         # how often to check for clips while a watched gam
 CFB_AFTER_FINAL_MINUTES = 15  # keep looking for clips this long after a game ends
 CFB_MAX_CLIP_SECONDS = 90     # skip longer videos (full-game recaps, press conferences)
 CFB_MAX_CLIP_AGE_MINUTES = 10 # drop clips that waited in the queue longer than this
-CFB_MAX_BITRATE = 2_500_000   # about 720p; lower it (e.g. 1_000_000 for SD) if clips stutter
+CFB_MAX_BITRATE = 3_000_000   # about 720p; lower it (e.g. 1_000_000 for SD) if clips stutter
+CFB_DECODER = "auto"          # "hardware" usually fixes stutter on onn and other Amlogic boxes, where
+                              # PiPup decodes popup video in software by default; "software"; or
+                              # "auto" = let PiPup decide
 
 CFB_POSITION = 2              # where the clip sits: same 0-8 grid as POSITION (2 = bottom right)
 CFB_WIDTH = 640               # clip size on the TV
@@ -213,16 +216,49 @@ def espn_clip(v):
     links = v.get("links") or {}
     source = links.get("source") or {}
     hls = source.get("HLS") or {}
-    hd, sd = (source.get("HD") or {}).get("href"), source.get("href")
-    urls = [hd, sd] if CFB_MAX_BITRATE >= 2_000_000 else [sd, hd]      # HD is 720p
-    urls += [((links.get("mobile") or {}).get("source") or {}).get("href"),
-             (hls.get("HD") or {}).get("href"), hls.get("href")]
-    url = next((u for u in urls if isinstance(u, str) and u.startswith("http")
-                and re.search(r"\.(mp4|m3u8)(\?|$)", u)), None)
+    found = []
+    hrefs(source, found)
+    hrefs(links.get("mobile"), found)
+    mp4 = [u for u in dict.fromkeys(found) if re.search(r"\.mp4(\?|$)", u)]
+    # ESPN file names carry their bitrate (..._360p30_1464k.mp4), so pick the best one that fits
+    rated = [(kbps_in(u), u) for u in mp4 if kbps_in(u)]
+    if rated:
+        fits = [p for p in rated if p[0] * 1000 <= CFB_MAX_BITRATE]
+        url = (max(fits) if fits else min(rated))[1]
+    else:
+        hd, sd = (source.get("HD") or {}).get("href"), source.get("href")
+        urls = [hd, sd] if CFB_MAX_BITRATE >= 2_000_000 else [sd, hd]      # HD is 720p
+        urls += mp4 + [(hls.get("HD") or {}).get("href"), hls.get("href")]
+        url = next((u for u in urls if isinstance(u, str) and u.startswith("http")
+                    and re.search(r"\.(mp4|m3u8)(\?|$)", u)), None)
     if not url:
         return None
     poster = v.get("thumbnail") or ((v.get("posterImages") or {}).get("default") or {}).get("href")
-    return {"url": url, "poster": poster if isinstance(poster, str) else None, "seconds": seconds or None}
+    return {"url": url, "poster": poster if isinstance(poster, str) else None, "seconds": seconds or None,
+            "quality": quality(url)}
+
+
+def hrefs(node, out):
+    """Every http link under a part of ESPN's video "links" tree."""
+    if isinstance(node, dict):
+        for k, val in node.items():
+            if k == "href" and isinstance(val, str) and val.startswith("http"):
+                out.append(val)
+            else:
+                hrefs(val, out)
+
+
+def kbps_in(url):
+    m = re.search(r"_(\d{3,5})k\.mp4(\?|$)", url)
+    return int(m.group(1)) if m else None
+
+
+def quality(url, bit_rate=None):
+    """A short label like "640x360, 832 kbps" from what the URL (or X) says about the file."""
+    m = re.search(r"/(\d{3,4}x\d{3,4})/", url) or re.search(r"_(\d{3,4}p)\d*_", url)
+    kbps = round(bit_rate / 1000) if bit_rate else kbps_in(url)
+    parts = [m.group(1) if m else "", f"{kbps} kbps" if kbps else ""]
+    return ", ".join(p for p in parts if p) or ("HLS" if ".m3u8" in url else "unknown size")
 
 
 def is_ranked(g, cutoff=CFB_RANK_CUTOFF):
@@ -333,13 +369,14 @@ def pick_video(m):
     if mp4:
         rate = lambda v: v.get("bit_rate") or 0  # noqa: E731
         fits = [v for v in mp4 if rate(v) <= CFB_MAX_BITRATE]
-        url = (max(fits, key=rate) if fits else min(mp4, key=rate))["url"]
+        best = max(fits, key=rate) if fits else min(mp4, key=rate)
+        url, label = best["url"], quality(best["url"], best.get("bit_rate"))
     else:
         hls = [v for v in variants if "mpegurl" in (v.get("content_type") or "").lower() and v.get("url")]
         if not hls:
             return None
-        url = hls[0]["url"]
-    return {"url": url, "poster": m.get("preview_image_url"), "seconds": seconds or None}
+        url, label = hls[0]["url"], "HLS"
+    return {"url": url, "poster": m.get("preview_image_url"), "seconds": seconds or None, "quality": label}
 
 
 # ---------------- X API ----------------
@@ -435,6 +472,9 @@ def show_clip(url, poster, seconds, title="", message=""):
     video = {"uri": url, "width": CFB_WIDTH, "height": CFB_HEIGHT, "muted": CFB_MUTED}
     if poster:
         video["poster"] = poster
+    decoder = str(CFB_DECODER).lower()
+    if decoder in ("hardware", "software"):
+        video["softwareDecoder"] = decoder == "software"
     card = {"id": CARD_ID, "duration": seconds, "position": CFB_POSITION,
             "dismissScreensaver": False, "media": {"video": video}}
     if CFB_SHOW_CAPTION:
@@ -654,7 +694,8 @@ class Replays:
             if show_clip(clip["url"], clip["poster"], seconds, title, message):
                 self.busy_until = now + seconds
                 label = matchup(game) if game else "clip"
-                log(f"Playing: {label} from {clip['credit']}  ({len(self.queue)} more queued)")
+                log(f"Playing: {label} from {clip['credit']} [{clip.get('quality', '?')}]  "
+                    f"({len(self.queue)} more queued)")
             return
 
 
@@ -679,13 +720,27 @@ def list_games(date=None, ranked_only=False):
 
 
 def test_video(url):
-    print(f"Sending a test clip to the TV at {TV_IP}...")
-    if show_clip(url, None, 25, "HUDdle test clip", "If this plays, video overlays work."):
-        print("Sent. A video should play on the TV for about 20 seconds.")
+    size = "720p sample" if url == SAMPLE_VIDEO else quality(url)
+    print(f"Sending a test clip ({size}, decoder: {CFB_DECODER}) to the TV at {TV_IP}...")
+    if not show_clip(url, None, 25, "HUDdle test clip", "If this plays, video overlays work."):
+        return
+    print("Sent. A video should play on the TV for about 20 seconds.")
+    if url == SAMPLE_VIDEO:
+        print("This sample is 720p whatever CFB_MAX_BITRATE says; it's for checking that video plays")
+        print("and comparing CFB_DECODER settings. Real clips print their size when they play.")
+    try:
+        time.sleep(12)
+        last = requests.get(f"http://{TV_IP}:7979/state", timeout=5).json().get("lastPopup") or {}
+    except (requests.RequestException, ValueError, KeyboardInterrupt):
+        return
+    if last.get("firstFrameMs") is not None:
+        print(f"TV reports the first frame took {last['firstFrameMs']} ms.")
+    if last.get("mediaError"):
+        print(f"TV reports a playback error: {last['mediaError']}")
 
 
 def main():
-    global VERBOSE
+    global VERBOSE, CFB_DECODER
     ap = argparse.ArgumentParser(description="College football replay clips on your TV.")
     ap.add_argument("--list", action="store_true", help="list this week's FBS games with their ESPN ids")
     ap.add_argument("--date", help="with --list: games on this date instead (YYYYMMDD)")
@@ -694,11 +749,14 @@ def main():
     ap.add_argument("--games", nargs="+", metavar="ID",
                     help="selected mode: watch only these ESPN game ids or links")
     ap.add_argument("--source", choices=["espn", "x"], help="where clips come from (overrides CFB_SOURCE)")
+    ap.add_argument("--decoder", choices=["auto", "hardware", "software"],
+                    help="how the TV decodes clips (overrides CFB_DECODER)")
     ap.add_argument("--test", nargs="?", const=SAMPLE_VIDEO, metavar="URL",
                     help="play a sample video on the TV and exit")
     ap.add_argument("--verbose", action="store_true", help="also explain why clips were skipped")
     args = ap.parse_args()
     VERBOSE = args.verbose
+    CFB_DECODER = args.decoder or CFB_DECODER
 
     if args.test:
         return test_video(args.test)
