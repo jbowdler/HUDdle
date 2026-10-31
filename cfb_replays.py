@@ -85,7 +85,9 @@ CFB_LOAD_SECONDS = 3          # time allowed for a clip to start playing; raise 
 
 CFB_ASK_FIRST = True          # show a "Watch replay" button first; the clip plays only if you press it
 CFB_PROMPT_SECONDS = 15       # how long the button stays up; ignoring it (or pressing BACK) skips the clip
-CFB_PROMPT_THUMBNAIL = True   # show the clip's still image with the button
+CFB_PROMPT_THUMBNAIL = True   # show a small still from the clip beside the text
+CFB_PROMPT_TEXT_SIZE = 13     # text size on the button card (PiPup's default is 16); smaller = smaller card
+CFB_PROMPT_POSITION = None    # where the button card sits (0-8 grid); None = same place as the clip
 CFB_CALLBACK_PORT = 8766      # port on this PC the TV reports button presses to
 PC_IP = None                  # this PC's LAN address as the TV sees it; None = auto-detect
 # ======================================================
@@ -292,6 +294,15 @@ def matchup(g, full=False):
 def score_line(g):
     a, h = g["away"], g["home"]
     return f"{team_label(a)} {a['score']}  @  {team_label(h)} {h['score']}   {g['detail']}"
+
+
+def score_short(g):
+    a, h = g["away"], g["home"]
+    return f"{team_label(a)} {a['score']} @ {team_label(h)} {h['score']} · {g['detail']}"
+
+
+def shorten(text, limit):
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
 def kickoff_label(g):
@@ -507,12 +518,18 @@ def hide():
 def show_prompt(cur, seconds, callback):
     """The "Watch replay" button. While it's up, the remote's OK and arrow keys go to it, not the TV app;
     BACK closes it."""
-    card = {"id": CARD_ID, "duration": seconds, "position": CFB_POSITION, "dismissScreensaver": False,
-            "title": cur["title"] or "Replay available", "message": cur["message"],
-            "showProgress": True, "callback": callback,
-            "buttons": [{"id": "watch", "label": "Watch replay"}, {"id": "skip", "label": "Skip"}]}
+    # Kept small on purpose: one row with a thumbnail icon, two short lines of text and the buttons
+    # at the end of the row. PiPup sizes the card to its content.
+    size = int(CFB_PROMPT_TEXT_SIZE)
+    position = CFB_PROMPT_POSITION if CFB_PROMPT_POSITION is not None else CFB_POSITION
+    card = {"id": CARD_ID, "duration": seconds, "position": position, "dismissScreensaver": False,
+            "title": cur.get("short_title") or cur["title"] or "Replay available",
+            "message": cur["message"], "titleSize": size, "messageSize": max(8, size - 2),
+            "padding": 10, "cornerRadius": 8, "showProgress": True, "callback": callback,
+            "buttonsInline": True, "buttonSize": max(8, size - 1),
+            "buttons": [{"id": "watch", "label": "Watch replay"}, {"id": "skip", "label": "✕"}]}
     if CFB_PROMPT_THUMBNAIL and cur.get("poster"):
-        card["media"] = {"image": {"uri": cur["poster"], "width": 320}}
+        card.update({"icon": cur["poster"], "iconPosition": "left", "iconWidth": 80})
     return post_card(card)
 
 
@@ -798,6 +815,7 @@ class Replays:
             game = self.games.get(clip["game"])
             text = clip["text"] if len(clip["text"]) <= 110 else clip["text"][:107] + "..."
             cur = {**clip, "title": score_line(game) if game else "",
+                   "short_title": score_short(game) if game else "",
                    "message": f"{text}  - {clip['credit']}" if text else clip["credit"],
                    "label": matchup(game) if game else "clip"}
             if self.buttons:
@@ -808,7 +826,8 @@ class Replays:
 
     def ask(self, cur, now):
         url, token = self.buttons.new_callback()
-        offer = dict(cur, message=cur["message"] + (f"   ({len(self.queue)} more waiting)" if self.queue else ""))
+        waiting = f"  (+{len(self.queue)} waiting)" if self.queue else ""
+        offer = dict(cur, message=shorten(cur["text"] or cur["credit"], 60) + waiting)
         if show_prompt(offer, CFB_PROMPT_SECONDS, url):
             self.prompt = {**cur, "token": token, "expires": now + CFB_PROMPT_SECONDS + 1}
             log(f"Replay ready: {cur['label']} - {cur['text'][:60]}  (waiting for the button)")
@@ -897,10 +916,10 @@ def test_button():
         return
     print(f"Showing a \"Watch replay\" button on the TV at {TV_IP}. The TV reports presses to {buttons.base}...")
     url, token = buttons.new_callback()
-    offer = {"title": "HUDdle test", "message": "Press Watch replay to play a sample clip", "poster": None}
+    offer = {"title": "HUDdle test", "message": "Press Watch replay to play a sample", "poster": None}
     if not show_prompt(offer, CFB_PROMPT_SECONDS, url):
         return
-    print(f"Press Watch replay (or Skip) on the TV within {CFB_PROMPT_SECONDS} seconds.")
+    print(f"Press Watch replay (or ✕) on the TV within {CFB_PROMPT_SECONDS} seconds.")
     button, deadline = None, time.time() + CFB_PROMPT_SECONDS + 5
     try:
         while button is None and time.time() < deadline:
