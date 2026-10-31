@@ -15,6 +15,7 @@ HUDdle puts a slim scoreboard bar at the top of your TV while you watch the game
 - **No flicker:** the bar is drawn once and updates its numbers in place
 - **Only shows during games** (optional) and removes itself when you stop the script
 - **Public and private ESPN leagues**
+- **College football replays (optional):** highlight clips from X pop up in a corner of the TV while your games are live, for every ranked game or just the games you pick. See [College football replays](#college-football-replays).
 
 ## How it works
 
@@ -150,6 +151,119 @@ Any of these can go in `overlay_config.py`.
 
 ESPN's API doesn't expose its own win probability, so HUDdle estimates one. It starts from ESPN's live projected totals and widens the uncertainty for every point still in play: a player who hasn't kicked off counts fully, one mid-game counts partly, and a finished player not at all. It's in the same ballpark as the ESPN app but won't match it exactly.
 
+## College football replays
+
+`cfb_replays.py` plays college football highlight clips in a small video popup while your games are live. It's separate from the fantasy bar: run either one, or both at once (they use different popups).
+
+```
+ESPN scoreboard ──> which watched games are live ──> X API: new video posts from your accounts ──> match to a game ──> PiPup plays the clip
+```
+
+- **Two modes.** `ranked` watches every game with a ranked team (the ranking ESPN shows). `selected` watches only the games you pick, by ESPN game id.
+- **Clips come from X accounts you choose.** By default these are national network and conference accounts (`@ESPNCFB`, `@CFBONFOX`, `@CBSSportsCFB`, `@BigTenNetwork`, `@SECNetwork`, `@accnetwork`, `@Big12Conference`), and you can add team accounts. Each clip is matched to a game by the team names in the post, or by the team account that posted it.
+- **X is only checked while a watched game is live**, so nothing is spent before kickoff or after the final whistle.
+- **The TV streams the clip straight from X**, at about 720p by default. Nothing is downloaded to your computer.
+- **Clips queue up** and play one at a time. If two accounts post the same play, only the first is shown.
+
+### 1. Get X API access
+
+The X API is paid per use. You need a developer account with a little credit on it:
+
+1. Sign up at [developer.x.com](https://developer.x.com), create a project and an app, and add credit to the account.
+2. In the app's **Keys and tokens**, generate the **Bearer Token** and copy it. Treat it like a password.
+
+### 2. Configure
+
+Add these to `overlay_config.py`. `TV_IP` is shared with the fantasy bar.
+
+```python
+X_BEARER_TOKEN = "AAAA..."     # from step 1
+CFB_MODE = "ranked"            # or "selected"
+CFB_GAME_IDS = []              # selected mode only (see step 4)
+```
+
+Only `requests` is needed: `python -m pip install requests`.
+
+### 3. Test video on the TV
+
+```
+python cfb_replays.py --test
+```
+
+A 15-second sample video should play in the bottom-right corner. If it doesn't, see [Troubleshooting](#troubleshooting).
+
+### 4. Pick games (selected mode)
+
+List this week's FBS games with their ESPN ids. Games with a ranked team are marked with `*`:
+
+```
+python cfb_replays.py --list
+python cfb_replays.py --list --date 20261107   # a specific day
+```
+
+```
+   ESPN id  When             Matchup
+ 401752771  Sat 3:30 PM     *#3 Texas @ #9 Georgia   (ABC)
+ 401752780  Sat 7:00 PM      Michigan State @ Michigan   (NBC)
+```
+
+Put the ids you want in `CFB_GAME_IDS` and set `CFB_MODE = "selected"`. You can also paste the link of an ESPN game page (it has `gameId/401752771` in it):
+
+```python
+CFB_MODE = "selected"
+CFB_GAME_IDS = [401752771, "https://www.espn.com/college-football/game/_/gameId/401752780"]
+```
+
+Or skip the config and pass them for one run: `python cfb_replays.py --games 401752771 401752780`. Games that aren't on the FBS scoreboard (FCS, for example) work too if you give their id.
+
+### 5. Run
+
+```
+python cfb_replays.py               # uses CFB_MODE from overlay_config.py
+python cfb_replays.py --ranked      # ranked mode for this run
+python cfb_replays.py --verbose     # also explain why each skipped post was skipped
+```
+
+The console shows which watched games are live, each clip it finds, and what's playing. Press **Ctrl+C** to stop. The popup disappears, and the console prints how many X posts were read and roughly what they cost.
+
+### Clips from team accounts
+
+National accounts name the teams in almost every highlight post. Team accounts often don't ("LET'S GOOOO 🐶"), so map them to their ESPN team abbreviation (shown by `--list`) and every video they post during that team's game counts:
+
+```python
+CFB_TEAM_ACCOUNTS = {"GeorgiaFootball": "UGA", "AlabamaFTBL": "ALA"}
+```
+
+If a nickname isn't being recognized, add it as an alias: `CFB_TEAM_ALIASES = {"ALA": ["Bama", "Roll Tide"]}`.
+
+### Cost
+
+Each post the X API returns costs about $0.005, which was X's pay-per-use rate when this was written; check your developer console for current pricing. To keep the bill small, the script only asks for video posts from your accounts, only new ones since the last check, and only while a watched game is live. Startup also looks up each account once, at about $0.01 each. With the default seven accounts, a full Saturday should cost roughly $1 to $2 (an estimate, not a measurement). Adding team accounts or polling more often raises it.
+
+### Replay settings
+
+Any of these can go in `overlay_config.py`.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `X_BEARER_TOKEN` | None | Your X API Bearer Token (or set the `X_BEARER_TOKEN` environment variable) |
+| `CFB_MODE` | `"ranked"` | `"ranked"`: every game with a ranked team. `"selected"`: only `CFB_GAME_IDS` |
+| `CFB_GAME_IDS` | `[]` | ESPN game ids or game links for selected mode |
+| `CFB_RANK_CUTOFF` | 25 | Ranked mode: 10 watches only games with a top-10 team |
+| `CFB_X_ACCOUNTS` | 7 national accounts | X handles to pull clips from (no @) |
+| `CFB_TEAM_ACCOUNTS` | `{}` | Team handles mapped to ESPN abbreviations |
+| `CFB_TEAM_ALIASES` | `{}` | Extra names to recognize for a team |
+| `CFB_POLL_SECONDS` | 60 | How often ESPN and X are checked |
+| `CFB_AFTER_FINAL_MINUTES` | 15 | Keep looking for clips this long after a game ends |
+| `CFB_MAX_CLIP_SECONDS` | 90 | Skip longer videos (press conferences, hype videos) |
+| `CFB_MAX_CLIP_AGE_MINUTES` | 10 | Drop clips that waited in the queue longer than this |
+| `CFB_GAME_COOLDOWN_SECONDS` | 120 | After a clip from a game, skip that game's clips for this long |
+| `CFB_MAX_BITRATE` | 2500000 | Highest video bitrate to use (about 720p); lower it if clips stutter |
+| `CFB_POSITION` | 2 | Where the clip sits (same grid as `POSITION`; 2 is bottom right) |
+| `CFB_WIDTH`, `CFB_HEIGHT` | 640, 360 | Clip size |
+| `CFB_MUTED` | True | `False` plays the clip's sound over the game |
+| `CFB_SHOW_CAPTION` | True | Show the score line and post text with the clip |
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -165,21 +279,31 @@ ESPN's API doesn't expose its own win probability, so HUDdle estimates one. It s
 | Console says `No games in progress for your matchup - waiting` | Working as intended: `ONLY_DURING_GAMES` is on and none of your matchup's starters is playing right now. Set it to `False` to test. |
 | No **Wireless debugging** option on the TV | Older Android TV builds don't have it. Turn on **USB debugging** in Developer options instead, then try `adb connect 192.168.1.50:5555` and accept the prompt on the TV. This works on many boxes but hasn't been tested with HUDdle. |
 | Bar border turns red | The TV lost contact with the computer; check the script is running and the computer is awake. |
+| `--test` shows nothing or a black box | Update to the latest release of the PiPup fork; video playback needs a recent version. Check the TV can reach the internet. |
+| Replay clips stutter | Lower `CFB_MAX_BITRATE` to `1000000` (about 360p). Some boxes decode the popup in software. |
+| `X rejected the request (401)` | `X_BEARER_TOKEN` is wrong. Copy the Bearer Token from your app's **Keys and tokens** again. |
+| `X API error 402` or a credits message | Your X developer account is out of credit. |
+| `X account not found` | A handle in `CFB_X_ACCOUNTS` or `CFB_TEAM_ACCOUNTS` is misspelled or the account no longer exists. |
+| `Can't load ESPN game ...` | That id isn't an ESPN college football game. Check it with `--list`. |
+| No clips for a game | Run with `--verbose` to see why posts were skipped. Add the teams' accounts to `CFB_TEAM_ACCOUNTS` or their nicknames to `CFB_TEAM_ALIASES`. |
 
 ## Privacy and security
 
 - Your ESPN cookies stay on your computer. They are only sent to ESPN and are never included in the scoreboard page.
 - The scoreboard page on port 8765 has no login, so anyone on your home network can open it and see your matchup.
 - PiPup's port 7979 on the TV also has no login, so anyone on your network can put a popup on your TV. Keep both on a trusted home network, not a public or shared one.
+- Your X Bearer Token stays in `overlay_config.py` and is only sent to X. Anyone who has it can spend your X credit.
+- Replay clips stream from X's servers directly to the TV.
 
 ## Disclaimer
 
-HUDdle is an unofficial hobby project and is not affiliated with or endorsed by ESPN or the NFL. It uses ESPN's undocumented fantasy API through espn-api, which can change without notice.
+HUDdle is an unofficial hobby project and is not affiliated with or endorsed by ESPN, the NFL, the NCAA or X. It uses ESPN's undocumented fantasy and scoreboard APIs, which can change without notice. Replay clips belong to the accounts that post them; HUDdle only plays them on your own TV and doesn't save or re-share them.
 
 ## Credits
 
 - [espn-api](https://github.com/cwendt94/espn-api) for the ESPN fantasy data
 - [PiPup](https://github.com/mhoogenbosch/PiPup) (fork of [rogro82/PiPup](https://github.com/rogro82/PiPup)) for the TV overlay
+- [X API](https://developer.x.com) for the replay clips
 
 ## License
 
