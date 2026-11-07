@@ -16,6 +16,7 @@ HUDdle puts a slim scoreboard bar at the top of your TV while you watch the game
 - **Only shows during games** (optional) and removes itself when you stop the script
 - **Public and private ESPN leagues**
 - **College football replays (optional):** highlight clips pop up in a corner of the TV while your games are live, for every ranked game or just the games you pick. Free clips from ESPN, or from X if you have X API access. See [College football replays](#college-football-replays).
+- **College football scoreboard:** while the replay script runs, a bar at the top center rotates through every ranked game with the score, quarter, clock, network, down and distance, and each team's passing, rushing, total yards and turnovers on its side of the bar. See [Scoreboard](#scoreboard).
 
 ## How it works
 
@@ -166,6 +167,7 @@ ESPN scoreboard ──> which watched games are live ──> new highlight clips
 - **The TV streams each clip straight from ESPN or X**, at about 720p by default. Nothing is downloaded to your computer.
 - **You choose which clips to watch.** When a clip is ready, a small one-row card shows a thumbnail, the score, what happened, and **Watch replay** and **✕** buttons, so a clip never covers a play in the game you're watching. Press OK to watch. Ignore it, or press BACK or **✕**, and it goes away after 15 seconds. While the card is up, the remote's OK and arrow keys go to it instead of the TV app. Set `CFB_ASK_FIRST = False` to play clips without asking.
 - **Each clip plays twice in a row**, then the next one starts. Clips queue up and play one at a time. The popup blinks briefly between the two plays because it reopens to restart the clip. Set `CFB_PLAY_COUNT = 1` to play each clip once.
+- **A scoreboard of ranked games** stays at the top center the whole time the script runs. See [Scoreboard](#scoreboard).
 - **Close a clip any time** with the **✕** button at the end of its caption, or with BACK. Its replay is skipped and the next clip can come up straight away. While a clip with **✕** is playing, the remote's OK and arrow keys go to it instead of the TV app. Set `CFB_CLOSE_BUTTON = False` to leave the button off.
 
 ### 1. Configure
@@ -234,6 +236,29 @@ The console shows which watched games are live, each clip it finds, and what's p
 
 When the script starts watching a game, clips ESPN already posted (previews, earlier plays) are skipped; only clips posted after that are played. Start it before kickoff to catch everything.
 
+### Scoreboard
+
+While `cfb_replays.py` runs, a scoreboard bar sits at the top center of the TV and rotates through ranked games, one every 12 seconds. It's on by default, needs no setup and has no buttons, so it never takes the remote.
+
+![The scoreboard with a live game: team stats on each side, score, clock and network in the middle](docs/cfb-scoreboard.png)
+
+- **The middle** is the scoreboard: logos, rankings, records, scores, quarter and clock (or kickoff time, HALF or FINAL), and the TV network the game is on. Live games also show each team's timeouts left, a football on the team with the ball, and a strip with the down and distance that turns red in the red zone. A thin bar along the bottom is ESPN's live win probability in the two teams' colors.
+- **The wings** hold each team's stats on its own side: passing yards, rushing yards, total yards and turnovers (red when a team has any), with little bars comparing the two teams. Under them a ticker cycles through top passer, rusher and receiver, completions, third downs, first downs, time of possession, penalties and points by quarter.
+- **Before kickoff** the wings show each team's record, conference record, home or road record and ESPN's FPI win chance, the ticker shows season leaders, and the strip shows the line, over/under and stadium.
+- **Which games:** only games with a ranked team. By default (`"auto"`) live games come first, plus games kicking off in the next 90 minutes and ones that just ended. When none of those are on, it rotates through every ranked game of the week, so it's always up. `CFB_SCOREBOARD_GAMES = "live"` shows only games in progress and hides the bar otherwise.
+- **Scores update every 30 seconds** from ESPN. Each live game's stats come from ESPN's game page, the same free data as the clips.
+- **Narrow bars drop the wings:** if `CFB_SCOREBOARD_WIDTH` is too small for the stats, the wings disappear and the middle stays full size.
+
+Check how it looks on your TV, with made-up games:
+
+```
+python cfb_replays.py --test-scoreboard
+```
+
+The console also prints a preview link like `http://192.168.1.23:8767/`; open it in a browser on the computer to see the live scoreboard. To show only the scoreboard, without replay clips, run `python cfb_replays.py --scoreboard-only`. To turn it off, set `CFB_SCOREBOARD = False` or run with `--no-scoreboard`.
+
+**Running the fantasy bar too?** Both bars sit at the top center by default and would overlap. Move one of them, for example `POSITION = 6` (bottom center) for the fantasy bar, or `CFB_SCOREBOARD_POSITION = 6` for the scoreboard.
+
 ### Clips from X (optional)
 
 X usually has clips sooner and for more games, but needs X API access, which is paid per use.
@@ -292,6 +317,15 @@ Any of these can go in `overlay_config.py`.
 | `CFB_PROMPT_POSITION` | None | Where the button card sits (same grid as `POSITION`); None puts it where the clip plays |
 | `CFB_CALLBACK_PORT` | 8766 | Port on this computer the TV reports button presses to |
 | `PC_IP` | None | Computer's IP as seen by the TV; None auto-detects (shared with the fantasy bar) |
+| `CFB_SCOREBOARD` | True | Show the scoreboard at the top center while the script runs |
+| `CFB_SCOREBOARD_GAMES` | `"auto"` | `"auto"`: live ranked games plus ones about to start or just ended, or every ranked game this week when none are. `"all"`: every ranked game this week. `"live"`: only games in progress (hidden otherwise) |
+| `CFB_SCOREBOARD_RANK_CUTOFF` | 25 | 10 shows only games with a top-10 team |
+| `CFB_SCOREBOARD_CYCLE_SECONDS` | 12 | How long each game stays up before the next one |
+| `CFB_SCOREBOARD_FETCH_SECONDS` | 30 | How often scores and stats are pulled from ESPN |
+| `CFB_SCOREBOARD_POSITION` | 5 | Where the scoreboard sits (same grid as `POSITION`; 5 is top center) |
+| `CFB_SCOREBOARD_WIDTH`, `CFB_SCOREBOARD_HEIGHT` | 1240, 96 | Scoreboard size; text scales to fit, and the stat wings drop off if it's too narrow for them |
+| `CFB_SCOREBOARD_OPACITY` | 0.88 | Background darkness of the stat wings, 0 to 1 |
+| `CFB_SCOREBOARD_PORT` | 8767 | Port the scoreboard page is served on |
 | `X_BEARER_TOKEN` | None | X only: your X API Bearer Token (or set the `X_BEARER_TOKEN` environment variable) |
 | `CFB_X_ACCOUNTS` | 7 national accounts | X only: handles to pull clips from (no @) |
 | `CFB_TEAM_ACCOUNTS` | `{}` | X only: team handles mapped to ESPN abbreviations |
@@ -319,6 +353,9 @@ Any of these can go in `overlay_config.py`.
 | The button card covers too much | Lower `CFB_PROMPT_TEXT_SIZE` (e.g. 11), set `CFB_PROMPT_THUMBNAIL = False`, or move it with `CFB_PROMPT_POSITION` (e.g. 0 for top right). |
 | The remote stops controlling the TV app | A **Watch replay** card or a clip with **✕** is up and has the remote. Press BACK (or **✕**) to close it, or wait for it to finish. Shorten `CFB_PROMPT_SECONDS`, set `CFB_ASK_FIRST = False` to play clips without asking, or set `CFB_CLOSE_BUTTON = False` so playing clips leave the remote alone. |
 | A clip replays after I closed it | Update PiPup to the latest release of the fork. The script checks PiPup's list of popups on screen before replaying, and older versions don't report it. **✕** works on any version. |
+| Scoreboard and fantasy bar overlap | Both default to top center. Set `POSITION = 6` for the fantasy bar, or `CFB_SCOREBOARD_POSITION = 6` for the scoreboard. |
+| Scoreboard is blank or doesn't appear | Run `python cfb_replays.py --test-scoreboard`. If the bar shows but is empty, Windows Firewall is blocking port 8767 (allow Python on Private networks) or `PC_IP` needs setting. If the console says `no ranked games`, ESPN has none on this week's scoreboard. |
+| Scoreboard is too big or too small | Change `CFB_SCOREBOARD_WIDTH` and `CFB_SCOREBOARD_HEIGHT`; the text scales to the height. |
 | `Couldn't listen for button presses on port 8766` | Another program (or a second copy of the script) is using the port. Close it or change `CFB_CALLBACK_PORT`. Until then, clips play without asking. |
 | End of a clip is cut off when it replays, or there's a pause between plays | Raise or lower `CFB_LOAD_SECONDS` (default 3). The replay starts that many seconds after the clip's length, to allow for loading. |
 | Replay clips stutter | First set `CFB_DECODER = "hardware"` (compare with `--test --decoder hardware`): onn and other Amlogic boxes decode popups in software by default. If they still stutter, lower `CFB_MAX_BITRATE`; the console shows each clip's size as it plays, e.g. `[640x360, 832 kbps]`. If the TV picture behind a clip freezes when it closes, set `CFB_DECODER` back to `"auto"`. |
@@ -337,6 +374,7 @@ Any of these can go in `overlay_config.py`.
 - PiPup's port 7979 on the TV also has no login, so anyone on your network can put a popup on your TV. Keep both on a trusted home network, not a public or shared one.
 - Your X Bearer Token stays in `overlay_config.py` and is only sent to X. Anyone who has it can spend your X credit.
 - Replay clips stream from ESPN's or X's servers directly to the TV.
+- The scoreboard page on port 8767 has no login, but it only shows public ESPN scores.
 - While `cfb_replays.py` runs, it listens on port 8766 for **Watch replay** and **✕** presses from the TV. Each card and clip uses a new random link, so other devices can't fake a press for it.
 
 ## Disclaimer

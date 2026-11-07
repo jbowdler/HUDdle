@@ -14,6 +14,9 @@ How it works:
         matched to a game by the team names in the post or the team account that posted it.
   - New clips play one at a time in a PiPup popup on the TV, which streams them
     straight from ESPN or X; nothing is downloaded to this PC.
+  - A scoreboard bar sits at the top center of the TV the whole time, rotating through
+    ranked games: score, quarter and clock, network, down and distance, and each team's
+    stats (pass and rush yards, turnovers, top performers...) on its side of the bar.
 
 Setup:
     python -m pip install requests
@@ -21,6 +24,8 @@ Setup:
     python cfb_replays.py                         # watch the games set in overlay_config.py
     python cfb_replays.py --games 401752771 401752780   # watch just these games
     python cfb_replays.py --test                  # play a sample video to check the TV
+    python cfb_replays.py --test-scoreboard       # show the scoreboard with made-up games
+    python cfb_replays.py --scoreboard-only       # just the scoreboard, no replay clips
 """
 
 import argparse
@@ -94,6 +99,20 @@ CFB_CLOSE_BUTTON = True       # a ✕ button on the playing clip to close it (an
 CFB_CLOSE_BUTTON_SIZE = 10    # size of the ✕ (PiPup's default button is much bigger and widens the clip)
 CFB_CALLBACK_PORT = 8766     # port on this PC the TV reports button presses to
 PC_IP = None                  # this PC's LAN address as the TV sees it; None = auto-detect
+
+# ---- Scoreboard: a bar at the top center that rotates through ranked games ----
+CFB_SCOREBOARD = True         # False = replay clips only (or run with --no-scoreboard)
+CFB_SCOREBOARD_GAMES = "auto" # "auto": live ranked games plus ones about to start or just finished; when
+                              #   there are none of those, every ranked game this week (so it's always up)
+                              # "all": every ranked game this week   "live": only games in progress
+CFB_SCOREBOARD_RANK_CUTOFF = 25  # 10 = only games with a top-10 team
+CFB_SCOREBOARD_CYCLE_SECONDS = 12  # how long each game stays up before rotating
+CFB_SCOREBOARD_FETCH_SECONDS = 30  # how often scores and stats are pulled from ESPN
+CFB_SCOREBOARD_POSITION = 5   # same 0-8 grid as CFB_POSITION (5 = top center)
+CFB_SCOREBOARD_WIDTH = 1240   # bar size on the TV; text scales to fit. Too narrow for the stat wings
+CFB_SCOREBOARD_HEIGHT = 96    #   and they drop off, leaving the scoreboard itself
+CFB_SCOREBOARD_OPACITY = 0.88 # stat wings' background darkness (0-1)
+CFB_SCOREBOARD_PORT = 8767    # port on this PC the scoreboard page is served on
 # ======================================================
 
 # Keep your real values (especially X_BEARER_TOKEN) out of git: put any of the
@@ -196,14 +215,19 @@ def game_from(event_id, comp, status, date=None):
     }
 
 
-def fetch_scoreboard(date=None):
+def fetch_events(date=None):
+    """ESPN's raw scoreboard events: this week's FBS games, or one day's with date=YYYYMMDD."""
     params = {"groups": FBS, "limit": 500}
     if date:
         params["dates"] = date
     r = requests.get(f"{ESPN}/scoreboard", params=params, timeout=15)
     r.raise_for_status()
+    return r.json().get("events", [])
+
+
+def fetch_scoreboard(date=None):
     games = {}
-    for ev in r.json().get("events", []):
+    for ev in fetch_events(date):
         comp = (ev.get("competitions") or [{}])[0]
         g = game_from(ev.get("id"), comp, ev.get("status") or comp.get("status"), ev.get("date"))
         if g["away"] and g["home"]:
@@ -915,6 +939,785 @@ class Replays:
             debug(f"Replaying clip ({cur['play']}/{cur['plays']})")
 
 
+# ---------------- scoreboard (top center, ranked games) ----------------
+
+SCOREBOARD_ID = "cfb-scoreboard"
+PERIODS = {1: "1ST", 2: "2ND", 3: "3RD", 4: "4TH", 5: "OT"}
+LEADERS = (("passingYards", "PASS"), ("rushingYards", "RUSH"), ("receivingYards", "REC"))
+EXTRA_STATS = (("completionAttempts", "COMP"), ("thirdDownEff", "3RD DN"), ("firstDowns", "1ST DN"),
+               ("possessionTime", "POSS"), ("totalPenaltiesYards", "PEN"))
+
+
+def period_name(n):
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    return PERIODS.get(n) or (f"{n - 4}OT" if n > 5 else "")
+
+
+def clock_time(k):
+    return f"{k.hour % 12 or 12}:{k:%M} {'AM' if k.hour < 12 else 'PM'}"
+
+
+def game_clock(status, date):
+    """[small label, big label] for the middle of the scoreboard, e.g. ["2ND", "5:32"] or ["FINAL", ""]."""
+    st = status.get("type") or {}
+    state, name = st.get("state", "pre"), st.get("name", "")
+    short = (st.get("shortDetail") or st.get("detail") or "").strip()
+    if state == "pre":
+        try:
+            k = parse_time(date).astimezone()
+        except (ValueError, AttributeError):
+            return [short.upper(), ""]
+        return [f"{k:%a}".upper(), "TBD" if "TBD" in short.upper() else clock_time(k)]
+    if state == "post":
+        return [short.upper() or "FINAL", ""]
+    period = period_name(status.get("period"))
+    if name == "STATUS_HALFTIME":
+        return ["HALF", ""]
+    if name == "STATUS_END_PERIOD":
+        return ["END", period]
+    if "DELAY" in name or "delay" in short.lower():
+        return ["DELAY", period]
+    return [period, status.get("displayClock") or ""]
+
+
+def board_team(c, side, sit, state):
+    base = team_from(c)
+    t = base["raw"]
+    recs = {}
+    for r in c.get("records") or c.get("record") or []:
+        if isinstance(r, dict) and r.get("summary"):
+            recs.setdefault((r.get("type") or r.get("name") or "").lower(), r["summary"])
+    lines = []
+    for ls in c.get("linescores") or []:
+        try:
+            lines.append(str(int(float(ls.get("value", ls.get("displayValue"))))))
+        except (TypeError, ValueError, AttributeError):
+            pass
+    timeouts = sit.get(f"{side}Timeouts")
+    logo = t.get("logo") or ((t.get("logos") or [{}])[0] or {}).get("href") or ""
+    return {
+        "id": base["id"], "abbr": base["abbr"] or base["short"][:4].upper(), "name": base["short"],
+        "rank": base["rank"], "score": base["score"] or "0",
+        "record": recs.get("total") or recs.get("overall") or next(iter(recs.values()), ""),
+        "conf": recs.get("vsconf") or "",
+        "venue_rec": recs.get("home") if side == "home" else (recs.get("road") or recs.get("away") or ""),
+        "color": t.get("color") or "", "alt": t.get("alternateColor") or "", "logo": logo,
+        "timeouts": timeouts if isinstance(timeouts, int) and state == "in" else None,
+        "poss": state == "in" and bool(base["id"]) and str(sit.get("possession") or "") == base["id"],
+        "winner": bool(c.get("winner")), "lines": lines,
+    }
+
+
+def board_game(ev):
+    """One scoreboard event with everything the scoreboard shows that ESPN's scoreboard has."""
+    comp = (ev.get("competitions") or [{}])[0]
+    status = ev.get("status") or comp.get("status") or {}
+    st = status.get("type") or {}
+    state = st.get("state", "pre")
+    sit = comp.get("situation") or {} if state == "in" else {}
+    sides = {c.get("homeAway"): c for c in comp.get("competitors", [])}
+    if "away" not in sides or "home" not in sides:
+        return None
+    nets = [n for b in comp.get("broadcasts") or [] for n in b.get("names") or [] if n]
+    nets = nets or [(b.get("media") or {}).get("shortName") for b in comp.get("geoBroadcasts") or []]
+    nets = [n for n in nets if n]
+    odds = (comp.get("odds") or [{}])[0] or {}
+    notes = [n.get("headline") for n in comp.get("notes") or [] if n.get("headline")]
+    date = ev.get("date") or comp.get("date") or ""
+    return {
+        "id": str(ev.get("id")), "state": state, "date": date, "status_name": st.get("name", ""),
+        "detail": st.get("shortDetail") or st.get("detail") or "",
+        "away": board_team(sides["away"], "away", sit, state),
+        "home": board_team(sides["home"], "home", sit, state),
+        "clock": game_clock(status, date), "network": nets[0] if nets else "",
+        "situation": sit.get("downDistanceText") or "", "redzone": bool(sit.get("isRedZone")),
+        "last_play": (sit.get("lastPlay") or {}).get("text") or "",
+        "line": odds.get("details") or "", "ou": odds.get("overUnder"),
+        "venue": (comp.get("venue") or {}).get("fullName") or "", "note": notes[0] if notes else "",
+    }
+
+
+def kick_ts(g):
+    try:
+        return parse_time(g["date"]).timestamp()
+    except (ValueError, AttributeError):
+        return 0
+
+
+def pick_board_games(games, mode, now):
+    """The ranked games to rotate through, live ones first."""
+    ranked = [g for g in games if is_ranked(g, CFB_SCOREBOARD_RANK_CUTOFF)]
+    live = sorted((g for g in ranked if g["state"] == "in"), key=kick_ts)
+    pre = sorted((g for g in ranked if g["state"] == "pre"), key=kick_ts)
+    post = sorted((g for g in ranked if g["state"] == "post"), key=kick_ts, reverse=True)
+    if mode == "live":
+        return live
+    if mode == "auto":
+        soon = [g for g in pre if kick_ts(g) - now < 90 * 60]           # kicks off within 90 minutes
+        recent = [g for g in post if now - kick_ts(g) < 4.5 * 3600]     # finished in about the last hour
+        if live or soon or recent:
+            return live + soon + recent
+    return live + pre + post
+
+
+def summary_details(s, g):
+    """Team stats, top performers, win probability and the line from a game's ESPN summary."""
+    ids = {g["away"]["id"]: "away", g["home"]["id"]: "home"}
+    out = {"stats": {"away": {}, "home": {}}, "leaders": {"away": {}, "home": {}},
+           "winp": None, "line": "", "ou": None}
+    for t in (s.get("boxscore") or {}).get("teams") or []:
+        side = ids.get(str((t.get("team") or {}).get("id", ""))) or t.get("homeAway")
+        if side in out["stats"]:
+            for stat in t.get("statistics") or []:
+                if stat.get("name") and stat.get("displayValue") not in (None, ""):
+                    out["stats"][side][stat["name"]] = str(stat["displayValue"])
+    for t in s.get("leaders") or []:
+        side = ids.get(str((t.get("team") or {}).get("id", "")))
+        if not side:
+            continue
+        for cat in t.get("leaders") or []:
+            top = (cat.get("leaders") or [None])[0]
+            if top:
+                who = (top.get("athlete") or {}).get("shortName") or (top.get("athlete") or {}).get("displayName") or ""
+                out["leaders"][side][cat.get("name")] = f"{who}  {top.get('displayValue') or ''}".strip()
+    try:
+        out["winp"] = float((s.get("winprobability") or [])[-1]["homeWinPercentage"]) * 100
+    except (IndexError, KeyError, TypeError, ValueError):
+        try:   # before kickoff: ESPN's FPI projection
+            out["winp"] = float(((s.get("predictor") or {}).get("homeTeam") or {}).get("gameProjection"))
+        except (TypeError, ValueError):
+            pass
+    pick = (s.get("pickcenter") or [{}])[0] or {}
+    out["line"], out["ou"] = pick.get("details") or "", pick.get("overUnder")
+    return out
+
+
+def board_view(g, d=None):
+    """What the scoreboard page draws for one game."""
+    d = d or {}
+    a, h, state = g["away"], g["home"], g["state"]
+    stats = d.get("stats") or {"away": {}, "home": {}}
+    leaders = d.get("leaders") or {"away": {}, "home": {}}
+    winp = d.get("winp")
+
+    def team(t):
+        out = {k: t[k] for k in ("abbr", "name", "score", "record", "color", "alt", "logo",
+                                 "timeouts", "poss", "winner")}
+        out["rank"] = t["rank"] if 1 <= t["rank"] <= TOP_25 else None
+        return out
+
+    def both(label, key_a, key_h=None, kind=None, **extra):
+        cell = {"label": label, "away": key_a, "home": key_h, **extra}
+        if kind:
+            cell["kind"] = kind
+        return cell
+
+    ticker = [{"label": label, "away": leaders["away"].get(key, ""), "home": leaders["home"].get(key, "")}
+              for key, label in LEADERS if leaders["away"].get(key) or leaders["home"].get(key)]
+    view = {"id": g["id"], "state": state, "clock": g["clock"], "network": g["network"],
+            "away": team(a), "home": team(h), "redzone": False, "poss": "", "situation": "", "winp": None}
+    line, ou = g["line"] or d.get("line") or "", g["ou"] if g["ou"] is not None else d.get("ou")
+
+    if state == "pre":
+        pct = (lambda p: f"{round(p)}%") if winp is not None else (lambda p: "")
+        cells = [both("REC", a["record"], h["record"]), both("CONF", a["conf"], h["conf"]),
+                 both("AWAY", a["venue_rec"], h["venue_rec"], home_label="HOME"),
+                 both("FPI", pct(100 - (winp or 0)), pct(winp or 0))]
+        view["cells"] = [c for c in cells if c["away"] or c["home"]]
+        view["ticker"] = ticker            # before kickoff ESPN's leaders are season totals
+        view["situation"] = " · ".join(x for x in (g["note"], line and f"Line {line}",
+                                                   ou is not None and ou != "" and f"O/U {ou}", g["venue"]) if x)
+        view["winp"] = winp
+        view["winp_label"] = "FPI"
+    else:
+        sa, sh = stats["away"], stats["home"]
+        view["cells"] = [both("PASS", sa.get("netPassingYards"), sh.get("netPassingYards"), "num"),
+                         both("RUSH", sa.get("rushingYards"), sh.get("rushingYards"), "num"),
+                         both("YDS", sa.get("totalYards"), sh.get("totalYards"), "num"),
+                         both("TO", sa.get("turnovers"), sh.get("turnovers"), "to")]
+        ticker += [{"label": label, "away": sa.get(key, ""), "home": sh.get(key, "")}
+                   for key, label in EXTRA_STATS if sa.get(key) or sh.get(key)]
+        if a["lines"] or h["lines"]:
+            ticker.append({"label": "BY QTR", "away": "  ".join(a["lines"]), "home": "  ".join(h["lines"])})
+        view["ticker"] = ticker
+        if state == "in":
+            if g["status_name"] == "STATUS_HALFTIME":
+                view["situation"] = "HALFTIME" + (f" · {g['venue']}" if g["venue"] else "")
+            elif g["situation"]:
+                view["situation"] = g["situation"]
+                view["poss"] = a["abbr"] if a["poss"] else h["abbr"] if h["poss"] else ""
+                view["redzone"] = g["redzone"]
+            else:
+                view["situation"] = g["last_play"] or g["detail"]
+            view["winp"] = winp
+            view["winp_label"] = "WIN"
+        else:
+            view["situation"] = " · ".join(x for x in (g["note"], g["venue"]) if x) or g["detail"]
+    if view["winp"] is not None:
+        view["winp"] = max(0.0, min(100.0, round(view["winp"], 1)))
+    return view
+
+
+def show_scoreboard(url):
+    card = {"id": SCOREBOARD_ID, "duration": max(90, int(CFB_SCOREBOARD_FETCH_SECONDS) * 3),
+            "position": CFB_SCOREBOARD_POSITION, "padding": 0, "backgroundColor": "#00000000",
+            "dismissScreensaver": False,
+            "media": {"web": {"uri": url, "width": CFB_SCOREBOARD_WIDTH, "height": CFB_SCOREBOARD_HEIGHT,
+                              "transparent": True}}}
+    return post_card(card)
+
+
+def hide_scoreboard():
+    try:
+        requests.post(f"http://{TV_IP}:7979/cancel", params={"id": SCOREBOARD_ID}, timeout=5)
+    except requests.RequestException:
+        pass
+
+
+SCOREBOARD_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --op: .88; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: Roboto, "Segoe UI", Arial, sans-serif; color: #f2f4f7; font-size: 24px;
+         font-variant-numeric: tabular-nums; }
+  #sb { position: relative; height: 100%; width: 100%; }
+  #stage { display: flex; align-items: center; justify-content: center; height: 100%; transition: opacity .4s ease; }
+  #stage.fade { opacity: 0; }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  /* ---- center: the scoreboard ---- */
+  #pod { position: relative; flex: 0 0 auto; width: 22.5em; height: 3.62em; box-sizing: border-box;
+         display: flex; flex-direction: column; overflow: hidden; border-radius: .42em;
+         background: linear-gradient(180deg, rgba(26,30,41,.97), rgba(8,10,15,.97));
+         border: 1px solid rgba(255,255,255,.13); box-shadow: 0 .08em .45em rgba(0,0,0,.5); }
+  #sb.lost #pod { border-color: rgba(255,77,77,.75); }
+  #pc { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  #prog { position: absolute; left: 0; top: 0; height: .07em; width: 0; z-index: 2;
+          background: rgba(245,197,66,.85); }
+  #prog.run { width: 100%; transition: width linear; }
+  .main { flex: 1 1 auto; display: flex; align-items: stretch; min-height: 0; }
+
+  .team { flex: 1 1 0; min-width: 0; display: flex; align-items: center; position: relative;
+          padding: 0 .4em 0 .55em; background: linear-gradient(90deg, var(--cs), transparent 72%); }
+  .team.h { flex-direction: row-reverse; padding: 0 .55em 0 .4em;
+            background: linear-gradient(270deg, var(--cs), transparent 72%); }
+  .stripe { position: absolute; top: 0; bottom: 0; left: 0; width: .2em; background: var(--c); }
+  .team.h .stripe { left: auto; right: 0; }
+  .lg { position: relative; flex: 0 0 auto; width: 1.45em; height: 1.45em; border-radius: 50%;
+        background: var(--c); display: flex; align-items: center; justify-content: center; }
+  .lg span { font-size: .7em; font-weight: 800; }
+  .lg img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain;
+            filter: drop-shadow(0 0 .06em rgba(0,0,0,.9)); }
+  .lg.ok { background: none; } .lg.ok span { visibility: hidden; }
+  .nmcol { flex: 1 1 auto; min-width: 0; margin: 0 .3em 0 .38em; line-height: 1.05; }
+  .team.h .nmcol { margin: 0 .38em 0 .3em; }
+  .team.h .nmcol { text-align: right; }
+  .ab { font-size: .98em; font-weight: 800; letter-spacing: .02em; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; }
+  .rk { font-style: normal; font-size: .56em; font-weight: 700; color: #b4bccb; margin-right: .22em;
+        vertical-align: .32em; }
+  .rec { font-size: .47em; color: #9aa3b2; letter-spacing: .05em; white-space: nowrap; margin-top: .2em; }
+  .tos { display: inline-block; margin: 0 .45em; vertical-align: .12em; }
+  .tos i { display: inline-block; width: .8em; height: .26em; margin-right: .2em; border-radius: .1em;
+           background: rgba(255,255,255,.18); }
+  .tos i.on { background: #f5c542; }
+  .pb { position: absolute; right: -.28em; bottom: -.1em; width: .82em; height: .5em; display: flex;
+        filter: drop-shadow(0 0 .08em rgba(0,0,0,.9)); }
+  .team.h .pb { right: auto; left: -.28em; }
+  .pb svg { width: 100%; height: 100%; }
+  .sc { flex: 0 0 auto; min-width: 1.3em; text-align: center; font-size: 1.55em; font-weight: 800;
+        letter-spacing: -.02em; }
+  .sc:empty { display: none; }
+  .team.dim .sc, .team.dim .ab { color: #7a8292; }
+  .team.dim .lg { opacity: .5; }
+
+  .mid { flex: 0 0 4.3em; display: flex; flex-direction: column; align-items: center; justify-content: center;
+         background: rgba(0,0,0,.38); border-left: 1px solid rgba(255,255,255,.07);
+         border-right: 1px solid rgba(255,255,255,.07); }
+  .clk { display: flex; align-items: center; white-space: nowrap; }
+  .clk b { font-size: .6em; font-weight: 800; letter-spacing: .07em; color: #f5c542; margin-right: .45em; }
+  .clk span { font-size: .9em; font-weight: 700; }
+  .clk.solo b { font-size: .78em; color: #f2f4f7; margin: 0; letter-spacing: .05em; }
+  .clk.pre b { color: #aeb6c4; } .clk.pre span { font-size: .7em; }
+  .ld { display: inline-block; width: .3em; height: .3em; border-radius: 50%; background: #ff4d4d;
+        margin-right: .3em; animation: pulse 1.4s infinite; }
+  .net { margin-top: .22em; font-size: .42em; font-weight: 800; letter-spacing: .1em; padding: .12em .6em;
+         border-radius: .3em; background: #2a3140; color: #fff; border: 1px solid rgba(255,255,255,.28);
+         white-space: nowrap; max-width: 9em; overflow: hidden; text-overflow: ellipsis; }
+
+  .strip { flex: 0 0 1em; display: flex; align-items: center; padding: 0 .55em; min-width: 0;
+           background: rgba(255,255,255,.05); border-top: 1px solid rgba(255,255,255,.07); }
+  .strip > span { font-size: .5em; }
+  .strip.rz { background: linear-gradient(90deg, rgba(231,76,60,.55), rgba(231,76,60,.18)); }
+  .cnt { flex: 0 0 auto; color: #6f7888; letter-spacing: .08em; }
+  .sm { flex: 1 1 auto; min-width: 0; margin: 0 .8em; text-align: center; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; color: #d7dce5; letter-spacing: .03em; }
+  .pt { font-weight: 800; color: #fff; margin-right: .55em; }
+  .pt svg { width: 1.25em; height: .72em; margin-right: .3em; vertical-align: -.06em; }
+  .rzp { display: inline-block; margin-left: .6em; padding: 0 .5em; border-radius: .6em; background: #e74c3c;
+         color: #fff; font-weight: 800; letter-spacing: .1em; animation: pulse 1.6s infinite; }
+  .wpt { flex: 0 0 auto; color: #8f98a8; letter-spacing: .06em; } .wpt b { color: #fff; }
+  .wpb { flex: 0 0 .13em; display: flex; background: rgba(255,255,255,.08); }
+  .wpb i { display: block; height: 100%; transition: width .8s ease; }
+
+  /* ---- the wings: each team's stats ---- */
+  .wing { flex: 1 1 0; min-width: 0; height: 2.92em; box-sizing: border-box; position: relative;
+          display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
+  .wing::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: .09em; background: var(--c); }
+  .wing.l { margin-right: .18em; padding: 0 .55em 0 1.35em;
+            background: linear-gradient(90deg, var(--cs) 0, rgba(10,12,18,var(--op)) 58%);
+            clip-path: polygon(.95em 0, 100% 0, 100% 100%, 0 100%); }
+  .wing.r { margin-left: .18em; padding: 0 1.35em 0 .55em;
+            background: linear-gradient(270deg, var(--cs) 0, rgba(10,12,18,var(--op)) 58%);
+            clip-path: polygon(0 0, calc(100% - .95em) 0, 100% 100%, 0 100%); }
+  .cells { display: flex; }
+  .wing.r .cells { flex-direction: row-reverse; }
+  .cell { flex: 1 1 0; min-width: 0; padding: 0 .22em; display: flex; flex-direction: column; align-items: center; }
+  .cell .lb { font-size: .4em; font-weight: 700; letter-spacing: .14em; color: #9aa3b2; white-space: nowrap; }
+  .cell .v { font-size: .92em; font-weight: 800; line-height: 1.12; white-space: nowrap; }
+  .cell.bad .v { color: #ff6b5b; }
+  .cell.txt .v { font-size: .74em; line-height: 1.38; }
+  .bar { display: flex; width: 76%; height: .12em; margin-top: .1em; border-radius: .1em; overflow: hidden;
+         background: rgba(255,255,255,.12); }
+  .bar i { display: block; height: 100%; background: var(--c); }
+  .wing.r .bar { justify-content: flex-end; }
+  .tick { margin-top: .32em; font-size: .46em; color: #cfd5df; white-space: nowrap; overflow: hidden;
+          text-overflow: ellipsis; letter-spacing: .02em; transition: opacity .3s ease; }
+  .tick.fade { opacity: 0; }
+  .tick b { display: inline-block; color: #fff; font-weight: 800; letter-spacing: .1em; padding: 0 .45em;
+            margin-right: .6em; border-radius: .25em; background: var(--cs); }
+  .wing.r .tick { text-align: right; } .wing.r .tick b { margin: 0 0 0 .6em; }
+  body.nowings .wing, body.nogames .wing { display: none; }
+  #pod.empty { justify-content: center; align-items: center; color: #8f98a8; }
+  #pod.empty span { font-size: .6em; letter-spacing: .06em; }
+</style></head>
+<body><div id="sb"><div id="stage">
+  <div class="wing l" id="wl"></div>
+  <div id="pod"><div id="prog"></div><div id="pc"></div></div>
+  <div class="wing r" id="wr"></div>
+</div></div>
+<script>
+const $ = s => document.getElementById(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const BALL = '<svg viewBox="0 0 26 15"><ellipse cx="13" cy="7.5" rx="12" ry="6.6" fill="#b8692c" ' +
+  'stroke="#7a3f12" stroke-width="1"/><path d="M8 7.5h10M10.5 5.6v3.8M13 5.6v3.8M15.5 5.6v3.8" ' +
+  'stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>';
+const NETS = [["ESPN", "#c8102e"], ["ABC", "#111"], ["SEC", "#0b3d91"], ["ACC", "#013ca6"],
+  ["FOX", "#0a3a85"], ["FS1", "#0a3a85"], ["BTN", "#0c5aa6"], ["BIG TEN", "#0c5aa6"], ["CBS", "#1d4fa0"],
+  ["NBC", "#4b2a86"], ["PEACOCK", "#111"], ["CW", "#2e7d32"], ["TNT", "#111"], ["TRUTV", "#111"]];
+const TICK_MS = 4000;
+let games = [], idx = 0, curId = null, lastKey = "", lastOk = Date.now();
+let refresh = 5, cycle = 12, started = false, rotT = null, tickT = null;
+const tickPos = {};
+
+function rgb(hex) {
+  hex = String(hex || "").replace("#", "");
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+  return [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16));
+}
+function lum(c) {
+  const f = v => { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); };
+  return .2126 * f(c[0]) + .7152 * f(c[1]) + .0722 * f(c[2]);
+}
+// A team's color, swapped for its alternate (or a neutral) when it would vanish on the dark bar
+function teamColor(t) {
+  let c = rgb(t.color);
+  const a = rgb(t.alt);
+  if ((!c || lum(c) < .03) && a && lum(a) >= .03) c = a;
+  return c && lum(c) >= .03 ? c : [143, 162, 196];
+}
+const rgba = (c, a) => "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a + ")";
+const num = v => { const n = parseFloat(String(v == null ? "" : v).replace(/,/g, "")); return isNaN(n) ? null : n; };
+const blank = v => v == null || v === "";
+
+function netStyle(n) {
+  const u = String(n).toUpperCase();
+  const hit = NETS.find(p => u.indexOf(p[0]) === 0);
+  return hit ? "background:" + hit[1] : "";
+}
+
+function teamHtml(g, side, c) {
+  const t = g[side], o = g[side === "away" ? "home" : "away"];
+  const logo = /^https?:\/\//.test(t.logo || "")
+    ? '<img src="' + esc(t.logo) + '" alt="" onload="this.parentNode.classList.add(\'ok\')" onerror="this.remove()">' : "";
+  const rank = t.rank ? '<i class="rk">' + t.rank + '</i>' : "";
+  let tos = "";
+  if (g.state === "in" && t.timeouts != null) {
+    tos = '<span class="tos">';
+    for (let i = 0; i < 3; i++) tos += '<i class="' + (i < t.timeouts ? "on" : "") + '"></i>';
+    tos += '</span>';
+  }
+  const rec = side === "home" ? tos + esc(t.record) : esc(t.record) + tos;
+  const dim = g.state === "post" && o.winner && !t.winner ? " dim" : "";
+  return '<div class="team ' + (side === "away" ? "a" : "h") + dim + '" style="--c:' + rgba(c, 1) +
+    ';--cs:' + rgba(c, .38) + '"><span class="stripe"></span>' +
+    '<span class="lg"><span>' + esc(String(t.abbr).slice(0, 1)) + '</span>' + logo +
+    (t.poss ? '<i class="pb">' + BALL + '</i>' : "") + '</span>' +
+    '<div class="nmcol"><div class="ab">' + rank + esc(t.abbr) + '</div><div class="rec">' + rec + '</div></div>' +
+    '<span class="sc">' + (g.state === "pre" ? "" : esc(t.score)) + '</span></div>';
+}
+
+function midHtml(g) {
+  const big = g.clock[1], live = g.state === "in" ? '<i class="ld"></i>' : "";
+  return '<div class="mid"><div class="clk ' + g.state + (big ? "" : " solo") + '">' + live +
+    '<b>' + esc(g.clock[0]) + '</b>' + (big ? '<span>' + esc(big) + '</span>' : "") + '</div>' +
+    (g.network ? '<span class="net" style="' + netStyle(g.network) + '">' + esc(g.network) + '</span>' : "") + '</div>';
+}
+
+function stripHtml(g, n, total) {
+  let mid = "";
+  if (g.poss) mid += '<b class="pt">' + BALL + esc(g.poss) + '</b>';
+  mid += esc(g.situation);
+  if (g.redzone) mid += '<span class="rzp">RED ZONE</span>';
+  let wp = "";
+  if (g.winp != null) {
+    const home = g.winp >= 50, pct = Math.round(home ? g.winp : 100 - g.winp);
+    wp = esc(g.winp_label || "WIN") + ' <b>' + esc(g[home ? "home" : "away"].abbr) + ' ' + pct + '%</b>';
+  }
+  return '<div class="strip' + (g.redzone ? " rz" : "") + '"><span class="cnt">' +
+    (total > 1 ? n + "/" + total : "") + '</span><span class="sm">' + mid + '</span><span class="wpt">' + wp + '</span></div>';
+}
+
+function wpBar(g, ca, ch) {
+  if (g.winp == null) return '<div class="wpb"></div>';
+  return '<div class="wpb"><i style="width:' + (100 - g.winp) + '%;background:' + rgba(ca, .95) + '"></i>' +
+    '<i style="width:' + g.winp + '%;background:' + rgba(ch, .95) + '"></i></div>';
+}
+
+function cellsHtml(g, side) {
+  const other = side === "away" ? "home" : "away";
+  return (g.cells || []).map(cell => {
+    const v = cell[side], o = cell[other];
+    let cls = "", bar = "";
+    if (cell.kind === "num") {
+      const a = num(v), b = num(o);
+      const w = a != null && b != null && a + b > 0 ? Math.round(100 * Math.max(a, 0) / (Math.max(a, 0) + Math.max(b, 0))) : 0;
+      bar = '<span class="bar"><i style="width:' + w + '%"></i></span>';
+    } else if (cell.kind === "to") {
+      if (num(v) > 0) cls = " bad";
+      bar = '<span class="bar" style="visibility:hidden"></span>';
+    } else cls = " txt";
+    return '<div class="cell' + cls + '"><span class="lb">' + esc(cell[side + "_label"] || cell.label) +
+      '</span><span class="v">' + esc(blank(v) ? "–" : v) + '</span>' + bar + '</div>';
+  }).join("");
+}
+
+function wingSet(el, g, side, c) {
+  el.style.setProperty("--c", rgba(c, 1));
+  el.style.setProperty("--cs", rgba(c, .45));
+  el.innerHTML = '<div class="cells">' + cellsHtml(g, side) + '</div><div class="tick" id="tk-' + side + '"></div>';
+}
+
+function tickHtml(item, side) {
+  if (!item) return "";
+  const v = blank(item[side]) ? "–" : esc(item[side]), b = '<b>' + esc(item.label) + '</b>';
+  return side === "away" ? b + v : v + b;
+}
+
+function showTick(animate) {
+  const g = games[idx];
+  if (!g) return;
+  const items = g.ticker || [];
+  const item = items.length ? items[(tickPos[g.id] || 0) % items.length] : null;
+  const els = [$("tk-away"), $("tk-home")].filter(Boolean);
+  const put = () => { els.forEach(el => { el.innerHTML = tickHtml(item, el.id.slice(3)); el.classList.remove("fade"); }); };
+  if (!animate) return put();
+  els.forEach(el => el.classList.add("fade"));
+  setTimeout(put, 300);
+}
+
+function render(animate) {
+  const pc = $("pc"), pod = $("pod");
+  document.body.classList.toggle("nogames", !games.length);
+  if (!games.length) {
+    pod.className = "empty";
+    pc.innerHTML = '<span>No ranked games right now</span>';
+    lastKey = "";
+    return;
+  }
+  pod.className = "";
+  idx = idx % games.length;
+  const g = games[idx];
+  const key = JSON.stringify(g) + "|" + idx + "|" + games.length;
+  if (!animate && key === lastKey) return;
+  const draw = () => {
+    curId = g.id;
+    lastKey = key;
+    const ca = teamColor(g.away), ch = teamColor(g.home);
+    pc.innerHTML = '<div class="main">' + teamHtml(g, "away", ca) + midHtml(g) + teamHtml(g, "home", ch) + '</div>' +
+      stripHtml(g, idx + 1, games.length) + wpBar(g, ca, ch);
+    wingSet($("wl"), g, "away", ca);
+    wingSet($("wr"), g, "home", ch);
+    fit();
+    showTick(false);
+    if (animate && started) { clearTimeout(tickT); tickT = setTimeout(ticker, TICK_MS); }  // a full first slice
+  };
+  if (!animate) return draw();
+  const st = $("stage");
+  st.classList.add("fade");
+  setTimeout(() => { draw(); st.classList.remove("fade"); }, 400);
+}
+
+function overflowing() {
+  if ($("stage").scrollHeight > window.innerHeight + 1) return true;
+  for (const el of document.querySelectorAll(".main, .clk, .ab"))
+    if (el.offsetParent && el.scrollWidth > el.clientWidth + 1) return true;
+  // Stat values are centered in their cells, so their overflow doesn't show in scrollWidth
+  const gap = parseFloat(document.body.style.fontSize) * .4;
+  for (const v of document.querySelectorAll(".cell .v"))
+    if (v.offsetParent && v.offsetWidth > v.parentNode.clientWidth - gap) return true;
+  return false;
+}
+
+function fitAt(wings) {
+  document.body.classList.toggle("nowings", !wings);
+  let fs = window.innerHeight / 3.75;
+  document.body.style.fontSize = fs + "px";
+  while (overflowing() && fs > 6) { fs -= .5; document.body.style.fontSize = fs + "px"; }
+  return fs;
+}
+
+// Full size with the stat wings if they fit; if they'd squeeze the text much, drop them instead
+function fit() {
+  const full = window.innerHeight / 3.75, withWings = fitAt(true);
+  if (withWings >= full * .85) return;
+  if (fitAt(false) <= withWings + .5) fitAt(true);   // the wings weren't what was squeezing it
+}
+
+function progress() {
+  const p = $("prog");
+  p.classList.remove("run"); p.style.transitionDuration = "0s"; void p.offsetWidth;
+  if (games.length < 2) return;
+  p.style.transitionDuration = cycle + "s"; p.classList.add("run");
+}
+
+function rotate() {
+  if (games.length > 1) { idx = (idx + 1) % games.length; render(true); }
+  progress();
+  rotT = setTimeout(rotate, cycle * 1000);
+}
+
+function ticker() {
+  const g = games[idx];
+  if (g && (g.ticker || []).length > 1) { tickPos[g.id] = (tickPos[g.id] || 0) + 1; showTick(true); }
+  tickT = setTimeout(ticker, TICK_MS);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("data.json?t=" + Date.now(), {cache: "no-store"});
+    const d = await r.json();
+    if (d.ready) {
+      document.documentElement.style.setProperty("--op", d.opacity);
+      refresh = d.refresh || 5; cycle = d.cycle || 12;
+      games = d.games || [];
+      const j = games.findIndex(g => g.id === curId);
+      if (j >= 0) idx = j;
+      render(false);
+      if (!started) { started = true; progress(); rotT = setTimeout(rotate, cycle * 1000); tickT = setTimeout(ticker, TICK_MS); }
+    }
+    lastOk = Date.now();
+    $("sb").classList.remove("lost");
+  } catch (e) {
+    if (Date.now() - lastOk > 45000) $("sb").classList.add("lost");
+  }
+  setTimeout(poll, refresh * 1000);
+}
+
+window.addEventListener("resize", fit);
+poll();
+</script></body></html>
+"""
+
+
+class Scoreboard:
+    """Serves the scoreboard page to the TV and keeps its data fresh from ESPN in the background."""
+
+    def __init__(self, pc_ip=None, port=None):
+        self.state = {"ready": False}
+        self.lock = threading.Lock()
+        self.cache = {}               # game id -> {"at", "state", "data"} from ESPN's game summary
+        self.stopping = threading.Event()
+        self.showing = False
+        self.last_note = None
+        self.error_logged = False
+        board = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/data.json"):
+                    with board.lock:
+                        body, ctype = json.dumps(board.state).encode(), "application/json"
+                elif self.path in ("/", "/index.html") or self.path.startswith("/?"):
+                    body, ctype = SCOREBOARD_PAGE.encode(), "text/html; charset=utf-8"
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.http = ThreadingHTTPServer(("0.0.0.0", CFB_SCOREBOARD_PORT if port is None else port), Handler)
+        self.url = f"http://{pc_ip or detect_pc_ip()}:{self.http.server_address[1]}/"
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+    def set_games(self, views):
+        with self.lock:
+            self.state = {"ready": True, "games": views, "cycle": CFB_SCOREBOARD_CYCLE_SECONDS,
+                          "refresh": 5, "opacity": CFB_SCOREBOARD_OPACITY}
+
+    def start(self):
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        while not self.stopping.is_set():
+            try:
+                self.update(time.time())
+            except Exception as e:  # never let a surprise in ESPN's data take the scoreboard down
+                log(f"Scoreboard error: {e}")
+            self.stopping.wait(CFB_SCOREBOARD_FETCH_SECONDS)
+
+    def update(self, now):
+        try:
+            events = fetch_events()
+        except (requests.RequestException, ValueError) as e:
+            if not self.error_logged:
+                log(f"Scoreboard: ESPN error ({e}); keeping the last scores up")
+                self.error_logged = True
+            self.keep_alive(self.showing)
+            return
+        self.error_logged = False
+        games = [g for g in (board_game(ev) for ev in events) if g]
+        mode = str(CFB_SCOREBOARD_GAMES).lower()
+        picked = pick_board_games(games, mode, now)
+        self.set_games([board_view(g, self.details(g, now)) for g in picked])
+        self.keep_alive(bool(picked))
+        live = sum(1 for g in picked if g["state"] == "in")
+        note = (f"Scoreboard: {games_text(len(picked))} with a top-{CFB_SCOREBOARD_RANK_CUTOFF} team"
+                f" ({live} live)" if picked else
+                "Scoreboard: no ranked games live - hidden" if mode == "live" else
+                "Scoreboard: no ranked games on ESPN's scoreboard - hidden")
+        if note != self.last_note:
+            log(note)
+            self.last_note = note
+
+    def details(self, g, now):
+        """Stats from the game's ESPN summary: every fetch while live, once after the final,
+        every 15 minutes before kickoff (for the line and FPI)."""
+        cached = self.cache.get(g["id"])
+        if cached and cached["state"] == g["state"]:
+            age = now - cached["at"]
+            if (g["state"] == "post" or (g["state"] == "in" and age < CFB_SCOREBOARD_FETCH_SECONDS - 2)
+                    or (g["state"] == "pre" and age < 900)):
+                return cached["data"]
+        try:
+            data = summary_details(fetch_summary(g["id"]), g)
+        except (requests.RequestException, ValueError) as e:
+            debug(f"Scoreboard: couldn't load stats for {matchup(g)}: {e}")
+            return cached["data"] if cached else None
+        self.cache[g["id"]] = {"at": now, "state": g["state"], "data": data}
+        return data
+
+    def keep_alive(self, show):
+        # Re-sending the same card id and page keeps it up without redrawing it
+        if show:
+            self.showing = show_scoreboard(self.url) or self.showing
+        elif self.showing:
+            hide_scoreboard()
+            self.showing = False
+
+    def stop(self):
+        self.stopping.set()
+        hide_scoreboard()
+        self.http.shutdown()
+
+
+def start_scoreboard():
+    try:
+        board = Scoreboard(PC_IP)
+    except OSError as e:
+        log(f"Couldn't serve the scoreboard on port {CFB_SCOREBOARD_PORT} ({e}); running without it.")
+        return None
+    log(f"Scoreboard page: {board.url}  (open it in a browser on this PC to preview)")
+    board.start()
+    return board
+
+
+def sample_games():
+    """Made-up games for --test-scoreboard: one live in the red zone, one final, one before kickoff."""
+    logo = "https://a.espncdn.com/i/teamlogos/ncaa/500/{}.png".format
+
+    def team(abbr, name, rank, score, record, color, alt, tid, **kw):
+        return {"abbr": abbr, "name": name, "rank": rank, "score": score, "record": record, "color": color,
+                "alt": alt, "logo": logo(tid), "timeouts": None, "poss": False, "winner": False, **kw}
+
+    def stat(label, a, h, kind="num"):
+        return {"label": label, "away": a, "home": h, "kind": kind}
+
+    live = {"id": "sample-live", "state": "in", "clock": ["3RD", "4:12"], "network": "ABC",
+            "away": team("TEX", "Texas", 5, "24", "8-1", "bf5700", "ffffff", 251, timeouts=2, poss=True),
+            "home": team("UGA", "Georgia", 9, "20", "7-2", "ba0c2f", "000000", 61, timeouts=3),
+            "redzone": True, "poss": "TEX", "situation": "2nd & 6 at UGA 14", "winp": 44.6, "winp_label": "WIN",
+            "cells": [stat("PASS", "212", "187"), stat("RUSH", "131", "96"), stat("YDS", "343", "283"),
+                      stat("TO", "0", "2", "to")],
+            "ticker": [{"label": "PASS", "away": "A. Manning  17/24, 212 YDS, 2 TD",
+                        "home": "G. Beck  15/27, 187 YDS, 1 TD, 1 INT"},
+                       {"label": "RUSH", "away": "Q. Wisner  18 CAR, 97 YDS", "home": "N. Frazier  12 CAR, 61 YDS"},
+                       {"label": "3RD DN", "away": "6-11", "home": "3-10"},
+                       {"label": "BY QTR", "away": "7  10  7", "home": "3  14  3"}]}
+    final = {"id": "sample-final", "state": "post", "clock": ["FINAL/OT", ""], "network": "NBC",
+             "away": team("USC", "USC", 14, "27", "6-3", "9e2237", "ffc72c", 30),
+             "home": team("ORE", "Oregon", 3, "34", "9-0", "154733", "fee11a", 2483, winner=True),
+             "redzone": False, "poss": "", "situation": "Autzen Stadium", "winp": None,
+             "cells": [stat("PASS", "301", "244"), stat("RUSH", "88", "203"), stat("YDS", "389", "447"),
+                       stat("TO", "1", "0", "to")],
+             "ticker": [{"label": "PASS", "away": "M. Moss  24/38, 301 YDS, 2 TD",
+                         "home": "D. Moore  19/26, 244 YDS, 3 TD"},
+                        {"label": "BY QTR", "away": "7  7  3  10  0", "home": "3  14  7  3  7"}]}
+    pre = {"id": "sample-pre", "state": "pre", "clock": ["SAT", "7:30 PM"], "network": "ESPN",
+           "away": team("TENN", "Tennessee", 20, "0", "6-3", "ff8200", "ffffff", 2633),
+           "home": team("ALA", "Alabama", 1, "0", "9-0", "9e1b32", "ffffff", 333),
+           "redzone": False, "poss": "", "situation": "Line ALA -10.5 · O/U 52.5 · Bryant-Denny Stadium",
+           "winp": 78.4, "winp_label": "FPI",
+           "cells": [{"label": "REC", "away": "6-3", "home": "9-0"}, {"label": "CONF", "away": "3-3", "home": "6-0"},
+                     {"label": "AWAY", "home_label": "HOME", "away": "2-2", "home": "5-0"},
+                     {"label": "FPI", "away": "22%", "home": "78%"}],
+           "ticker": [{"label": "PASS", "away": "J. Aguero  2,104 YDS, 15 TD", "home": "T. Simpson  2,456 YDS, 21 TD"}]}
+    return [live, final, pre]
+
+
+def test_scoreboard(seconds=90):
+    try:
+        board = Scoreboard(PC_IP)
+    except OSError as e:
+        print(f"Couldn't serve the scoreboard on port {CFB_SCOREBOARD_PORT}: {e}")
+        return
+    board.set_games(sample_games())
+    print(f"Showing a sample scoreboard (made-up games) on the TV at {TV_IP} for {seconds} seconds.")
+    print(f"Preview it in a browser: {board.url}   Ctrl+C to stop early.")
+    if not show_scoreboard(board.url):
+        board.http.shutdown()
+        return
+    try:
+        time.sleep(seconds)
+    except KeyboardInterrupt:
+        pass
+    board.stop()
+    print("Done - scoreboard removed.")
+
+
 # ---------------- commands ----------------
 
 def list_games(date=None, ranked_only=False):
@@ -1000,6 +1803,20 @@ def test_button():
     buttons.close()
 
 
+def scoreboard_only():
+    board = start_scoreboard()
+    if not board:
+        return
+    log(f"Scoreboard only (no replay clips): games with a top-{CFB_SCOREBOARD_RANK_CUTOFF} team. Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    board.stop()
+    print("Stopped - scoreboard removed.")
+
+
 def main():
     global VERBOSE, CFB_DECODER
     ap = argparse.ArgumentParser(description="College football replay clips on your TV.")
@@ -1016,6 +1833,10 @@ def main():
                     help="play a sample video on the TV and exit")
     ap.add_argument("--test-button", action="store_true",
                     help="show a Watch replay button on the TV and check the press reaches this PC")
+    ap.add_argument("--test-scoreboard", action="store_true",
+                    help="show the scoreboard on the TV with made-up games for 90 seconds and exit")
+    ap.add_argument("--scoreboard-only", action="store_true", help="show the scoreboard without replay clips")
+    ap.add_argument("--no-scoreboard", action="store_true", help="replay clips without the scoreboard")
     ap.add_argument("--no-ask", action="store_true", help="play clips without asking first (overrides CFB_ASK_FIRST)")
     ap.add_argument("--verbose", action="store_true", help="also explain why clips were skipped")
     args = ap.parse_args()
@@ -1026,12 +1847,17 @@ def main():
         return test_video(args.test)
     if args.test_button:
         return test_button()
+    if args.test_scoreboard:
+        return test_scoreboard()
     if args.list:
         try:
             return list_games(args.date, args.ranked)
         except (requests.RequestException, ValueError) as e:
             print(f"Couldn't load games from ESPN: {e}")
             return
+
+    if args.scoreboard_only:
+        return scoreboard_only()
 
     mode = "selected" if args.games else "ranked" if args.ranked else str(CFB_MODE).lower()
     selected = None
@@ -1075,6 +1901,8 @@ def main():
     else:
         log(f"Ranked mode: games with a top-{CFB_RANK_CUTOFF} team, clips from {clips_from}. Ctrl+C to stop.")
 
+    scoreboard = start_scoreboard() if CFB_SCOREBOARD and not args.no_scoreboard else None
+
     next_poll = 0
     try:
         while True:
@@ -1094,6 +1922,8 @@ def main():
     except KeyboardInterrupt:
         pass
     hide()
+    if scoreboard:
+        scoreboard.stop()
     if buttons:
         buttons.close()
     if replays.x:
