@@ -2,15 +2,18 @@
 
 **A heads-up display for fantasy football: live ESPN scores, win %, and player matchups overlaid on any Android TV app.**
 
-HUDdle puts a slim scoreboard bar at the top of your TV while you watch the game, in any app: YouTube TV, a streaming app, an IPTV player, whatever. It shows your matchup score, win probability and how many players each side has left, then cycles through every position matchup (QB vs QB, RB vs RB, FLEX vs FLEX…) so you can sweat your lineup without picking up your phone.
+HUDdle puts a scoreboard bar at the top of your TV while you watch the game, in any app: YouTube TV, a streaming app, an IPTV player, whatever. It shows your matchup score, margin, win probability and how many players each side has left, with one position matchup (QB vs QB, RB vs RB, FLEX vs FLEX…) on either side that cycles through your whole lineup, so you can sweat your lineup without picking up your phone.
+
+![The fantasy bar: the matchup score in the middle, a QB matchup on either side](docs/fantasy-bar.png)
 
 <!-- Add a photo of the bar on your TV here -->
 <!-- ![HUDdle on a TV](docs/screenshot.jpg) -->
 
 ## Features
 
-- **Matchup header:** both team scores, margin, estimated win %, players live and players left
-- **Rotating player matchups:** each starter vs their opponent's starter, with points, projections and game status (live, final, kickoff time)
+- **Matchup in the middle:** both teams' logos, records and scores, the margin, estimated win % (also drawn as a bar in the two teams' colors), projected totals, players live and players left
+- **Rotating player matchups on the sides:** your starter on the left, your opponent's on the right, with points, projections, a bar showing how close each player is to his projection (gold once he passes it), and game status (live, final, kickoff time)
+- **Same look as the college football scoreboard**, so the two bars match if you run both
 - **Works over any app**, because the bar is a system overlay, not part of a video player
 - **No flicker:** the bar is drawn once and updates its numbers in place
 - **Only shows during games** (optional) and removes itself when you stop the script
@@ -142,8 +145,9 @@ Any of these can go in `overlay_config.py`.
 | `PAGE_REFRESH_SECONDS` | 5 | How often the bar picks up new scores |
 | `ONLY_DURING_GAMES` | True | Show the bar only while your matchup has a game in progress |
 | `POSITION` | 5 | Where the bar sits: 0 top right, 1 top left, 2 bottom right, 3 bottom left, 4 center, 5 top center, 6 bottom center, 7 center left, 8 center right |
-| `PANEL_WIDTH`, `PANEL_HEIGHT` | 820, 74 | Bar size; text scales to fit |
-| `PANEL_OPACITY` | 0.85 | Background darkness, 0 to 1 |
+| `PANEL_WIDTH`, `PANEL_HEIGHT` | 1240, 96 | Bar size; text scales to fit. Too narrow for the player wings and they drop off, and the player matchup moves under the score |
+| `PANEL_OPACITY` | 0.85 | Background darkness of the player wings, 0 to 1 |
+| `MY_COLOR`, `OPP_COLOR` | `"2f80ed"`, `"f2994a"` | Accent colors (hex) for your team and your opponent |
 | `WIN_SPREAD` | 0.7 | Win % volatility; higher is less confident |
 | `WEB_PORT` | 8765 | Port the scoreboard page is served on |
 | `PC_IP` | None | Computer's IP as seen by the TV; None auto-detects |
