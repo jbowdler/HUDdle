@@ -21,3 +21,7 @@ SWID = None                   # "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"
 # Clips come from ESPN (free, no account) unless you add an X API token:
 # X_BEARER_TOKEN = "AAAA..."  # optional: your X API app's Bearer Token; keep it secret
 # CFB_TEAM_ACCOUNTS = {}      # X only, e.g. {"AlabamaFTBL": "ALA"} to also pull clips from team accounts
+# Scoreboard of ranked games at the top center (on by default while cfb_replays.py runs):
+# CFB_SCOREBOARD = True
+# CFB_SCOREBOARD_GAMES = "auto"   # "auto", "all" (every ranked game this week) or "live"
+# Running fantasy_overlay.py too? Its bar is also top center by default; move one, e.g. POSITION = 6
