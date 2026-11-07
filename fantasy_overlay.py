@@ -2,8 +2,9 @@
 HUDdle - live ESPN fantasy football scores on top of anything playing on your Android TV.
 Draws the overlay with PiPup (maintained fork: https://github.com/mhoogenbosch/PiPup).
 
-Shows a slim scoreboard bar at the top center of the TV: matchup score on top,
-one player matchup below (QB vs QB, RB vs RB...) that rotates every few seconds.
+Shows a scoreboard bar at the top center of the TV: the matchup score, margin and
+win % in the middle, with one player matchup (QB vs QB, RB vs RB...) on either side
+of it that rotates every few seconds.
 
 How it works:
   - This script runs a small web server on your PC (port WEB_PORT).
@@ -46,9 +47,11 @@ ONLY_DURING_GAMES = True     # False = keep the panel up even when no one is pla
 
 POSITION = 5                 # 5 = top center (0-8 grid: 0 top right, 1 top left, 2 bottom right,
                              #   3 bottom left, 4 center, 5 top center, ...)
-PANEL_WIDTH = 820            # panel size on the TV; text scales to fit
-PANEL_HEIGHT = 74
-PANEL_OPACITY = 0.85         # background darkness (0-1)
+PANEL_WIDTH = 1240           # panel size on the TV; text scales to fit. Too narrow for the player
+PANEL_HEIGHT = 96            #   wings and they drop off; the player matchup moves under the score
+PANEL_OPACITY = 0.85         # player wings' background darkness (0-1)
+MY_COLOR = "2f80ed"          # accent colors (hex) for your team and your opponent
+OPP_COLOR = "f2994a"
 WIN_SPREAD = 0.7             # win % volatility: higher = less confident estimate
 
 WEB_PORT = 8765
@@ -194,9 +197,21 @@ def win_probability(my_proj, opp_proj, my_lineup, opp_lineup):
     return max(1, min(99, round(pct)))
 
 
+def record(team):
+    try:
+        w, l, t = team.wins, team.losses, team.ties
+    except AttributeError:
+        return ""
+    return f"{w}-{l}" + (f"-{t}" if t else "")
+
+
 def team_dict(team, score, proj, lineup):
-    return {"name": team.team_name if team else "BYE", "score": round(score, 1),
-            "proj": round(proj, 1), "left": left_to_play(lineup), "live": live_count(lineup)}
+    name = team.team_name if team else "BYE"
+    logo = getattr(team, "logo_url", "") or ""
+    return {"name": name, "abbr": getattr(team, "team_abbrev", "") or name[:4].upper(),
+            "record": record(team) if team else "", "logo": logo if logo.startswith("http") else "",
+            "score": round(score, 1), "proj": round(proj, 1),
+            "left": left_to_play(lineup), "live": live_count(lineup)}
 
 
 def build_state(week, boxes, box, mine):
@@ -212,6 +227,7 @@ def build_state(week, boxes, box, mine):
         "rows": lineup_rows(m_lineup, o_lineup),
         "win": win_probability(m_proj, o_proj, m_lineup, o_lineup),
         "opacity": PANEL_OPACITY,
+        "colors": {"me": MY_COLOR, "opp": OPP_COLOR},
         "refresh": PAGE_REFRESH_SECONDS,
         "cycle": CYCLE_SECONDS,
     }
@@ -223,146 +239,245 @@ PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  html, body { margin: 0; background: transparent; overflow: hidden; height: 100%; }
-  body { font-family: Roboto, "Segoe UI", Arial, sans-serif; color: #f2f4f7; }
-  #bar { position: relative; box-sizing: border-box; width: 100%; padding: .3em 1em .42em;
-         overflow: hidden; border-radius: .55em; background: rgba(10,12,18,var(--op,.85));
-         border: 1px solid rgba(255,255,255,.08); }
+  :root { --op: .85; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: Roboto, "Segoe UI", Arial, sans-serif; color: #f2f4f7; font-size: 24px;
+         font-variant-numeric: tabular-nums; }
+  #sb { position: relative; height: 100%; width: 100%; }
+  #stage { display: flex; align-items: center; justify-content: center; height: 100%; }
+  @keyframes pulse { 50% { opacity: .25; } }
 
-  /* Each line: left half | center | right half. Halves are equal so the center stays centered. */
-  .line { display: flex; align-items: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .half { flex: 1 1 0; min-width: 0; display: flex; align-items: center; }
-  .half.r { flex-direction: row-reverse; }
-  .ctr { flex: 0 0 auto; text-align: center; margin: 0 1.1em; }
-  .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .half.r .nm { text-align: right; }
-
-  /* Numbers: never shrink, fixed gaps */
-  .num { flex: 0 0 auto; text-align: center; }
-  .proj { color: #8b93a3; font-size: .78em; min-width: 2.6em; }
-  .pts { font-weight: 700; min-width: 2.4em; }
-  .half:not(.r) .proj { margin: 0 .9em 0 .8em; }
-  .half.r .proj { margin: 0 .8em 0 .9em; }
-
-  /* Header */
-  .hdr .nm { font-size: .78em; color: #c3c9d4; }
-  .cnt { flex: 0 0 auto; font-size: .56em; color: #8b93a3; margin: 0 .9em; letter-spacing: .02em; }
-  .cnt b { color: #ff6b5b; font-weight: 700; }
-  .hdr .sc { flex: 0 0 auto; font-size: 1.22em; font-weight: 700; }
-  .hdr .half:not(.r) .sc { margin-left: .8em; }
-  .hdr .half.r .sc { margin-right: .8em; }
-  .wk b { font-weight: 700; letter-spacing: .04em; }
-  .wk .wp { color: #2ecc71; } .wk .lp { color: #ff6b5b; }
-  .wk { display: block; font-size: .48em; letter-spacing: .12em; color: #8b93a3; line-height: 1.1; }
-  .pill { display: inline-block; min-width: 3em; padding: .06em .45em; border-radius: 1em;
-          font-size: .64em; font-weight: 700; line-height: 1.25; }
-  .up { background: rgba(46,204,113,.18); color: #2ecc71; }
-  .down { background: rgba(231,76,60,.22); color: #ff6b5b; }
-  .tie { background: rgba(241,196,15,.18); color: #f1c40f; }
-  .win { color: #2ecc71; }
-
-  .sep { height: 1px; background: rgba(255,255,255,.08); margin: .24em 0 .22em; }
-
-  /* Player row */
-  #row { font-size: .82em; transition: opacity .35s ease; }
-  #row.fade { opacity: 0; }
-  .slot { display: inline-block; min-width: 3.4em; padding: .1em .4em; border-radius: .35em;
-          background: rgba(143,162,196,.14); color: #a9bad8; font-weight: 700;
-          font-size: .72em; letter-spacing: .05em; }
-  .t { color: #8b93a3; font-size: .8em; margin: 0 .45em; }
-  .dot { display: inline-block; width: .55em; height: .55em; border-radius: 50%; vertical-align: middle; }
-  .live { background: #ff4d4d; animation: pulse 1.4s infinite; }
-  .final { background: #5b6372; }
-  .ko { font-size: .7em; color: #8b93a3; }
-  .empty { color: #5b6372; font-style: italic; }
-  @keyframes pulse { 50% { opacity: .3; } }
-
-  #prog { position: absolute; left: 0; bottom: 0; height: 2px; width: 0; background: rgba(143,162,196,.55); }
+  /* ---- center: the matchup ---- */
+  #pod { position: relative; flex: 0 0 auto; width: 24.5em; height: 3.62em; box-sizing: border-box;
+         display: flex; flex-direction: column; overflow: hidden; border-radius: .42em;
+         background: linear-gradient(180deg, rgba(26,30,41,.97), rgba(8,10,15,.97));
+         border: 1px solid rgba(255,255,255,.13); box-shadow: 0 .08em .45em rgba(0,0,0,.5); }
+  #sb.lost #pod { border-color: rgba(255,77,77,.75); }
+  #pc { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  #prog { position: absolute; left: 0; top: 0; height: .07em; width: 0; z-index: 2;
+          background: rgba(245,197,66,.85); }
   #prog.run { width: 100%; transition: width linear; }
-  #bar.lost { border-color: rgba(255,77,77,.6); }
-</style></head>
-<body><div id="bar"><div class="line hdr" id="hdr"></div><div class="sep"></div><div class="line" id="row"></div><div id="prog"></div></div>
-<script>
-const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-let data = null, idx = 0, lastOk = Date.now(), refresh = 5, cycle = 5;
+  .main { flex: 1 1 auto; display: flex; align-items: stretch; min-height: 0; }
 
-function st(p) {
-  if (p.status === "live") return '<span class="dot live"></span>';
-  if (p.status === "final") return '<span class="dot final"></span>';
-  return '<span class="ko">' + esc(p.label) + '</span>';
+  .team { flex: 1 1 0; min-width: 0; display: flex; align-items: center; position: relative;
+          padding: 0 .4em 0 .55em; background: linear-gradient(90deg, var(--cs), transparent 72%); }
+  .team.h { flex-direction: row-reverse; padding: 0 .55em 0 .4em;
+            background: linear-gradient(270deg, var(--cs), transparent 72%); }
+  .stripe { position: absolute; top: 0; bottom: 0; left: 0; width: .2em; background: var(--c); }
+  .team.h .stripe { left: auto; right: 0; }
+  .lg { position: relative; flex: 0 0 auto; width: 1.45em; height: 1.45em; border-radius: 50%;
+        background: var(--c); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .lg span { font-size: .7em; font-weight: 800; }
+  .lg img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; }
+  .lg.ok span { visibility: hidden; }
+  .nmcol { flex: 1 1 auto; min-width: 0; margin: 0 .3em 0 .38em; line-height: 1.05; }
+  .team.h .nmcol { margin: 0 .38em 0 .3em; text-align: right; }
+  .ab { font-size: .98em; font-weight: 800; letter-spacing: .02em; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; }
+  .rec { font-size: .47em; color: #9aa3b2; letter-spacing: .05em; white-space: nowrap; margin-top: .2em; }
+  .rec b, .cnt b { color: #ff6b5b; font-weight: 700; }
+  .r1 + .r2, body.nowings .cnt { display: none; }
+  body.nowings .r1 + .r2 { display: inline; } body.nowings .r1 { display: none; }
+  .ld { display: inline-block; width: .55em; height: .55em; border-radius: 50%; background: #ff4d4d;
+        margin: 0 .25em 0 .1em; vertical-align: .05em; animation: pulse 1.4s infinite; }
+  .sc { flex: 0 0 auto; min-width: 2.2em; text-align: center; font-size: 1.4em; font-weight: 800;
+        letter-spacing: -.02em; }
+  .team.lead .sc { color: #fff; } .team.trail .sc { color: #aeb6c4; }
+
+  .mid { flex: 0 0 4.3em; display: flex; flex-direction: column; align-items: center; justify-content: center;
+         background: rgba(0,0,0,.38); border-left: 1px solid rgba(255,255,255,.07);
+         border-right: 1px solid rgba(255,255,255,.07); }
+  .clk { display: flex; align-items: center; white-space: nowrap; }
+  .clk b { font-size: .52em; font-weight: 800; letter-spacing: .08em; color: #f5c542; margin-right: .45em; }
+  .clk span { font-size: .78em; font-weight: 800; }
+  .up { color: #2ecc71; } .down { color: #ff6b5b; } .tie { color: #f1c40f; }
+  .badge { margin-top: .22em; font-size: .42em; font-weight: 800; letter-spacing: .1em; padding: .12em .6em;
+           border-radius: .3em; color: #fff; white-space: nowrap; border: 1px solid rgba(255,255,255,.28);
+           background: #2a3140; }
+  .badge.up { background: #1e8e4f; } .badge.down { background: #b83a2e; }
+
+  .strip { flex: 0 0 1em; display: flex; align-items: center; padding: 0 .55em; min-width: 0;
+           background: rgba(255,255,255,.05); border-top: 1px solid rgba(255,255,255,.07); }
+  .strip > span { font-size: .5em; }
+  .pj { flex: 0 0 auto; color: #8f98a8; letter-spacing: .06em; } .pj b { color: #fff; }
+  .sm { flex: 1 1 auto; min-width: 0; margin: 0 .8em; text-align: center; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; color: #d7dce5; letter-spacing: .03em; transition: opacity .35s ease; }
+  .sm .short { display: none; }
+  body.nowings .sm .long { display: none; } body.nowings .sm .short { display: inline; }
+  .sm b { color: #fff; } .sm .w { color: #2ecc71; }
+  .chip { display: inline-block; padding: 0 .45em; margin: 0 .5em; border-radius: .3em; font-weight: 800;
+          letter-spacing: .08em; background: rgba(143,162,196,.22); color: #c9d6ee; }
+  .wpb { flex: 0 0 .13em; display: flex; background: rgba(255,255,255,.08); }
+  .wpb i { display: block; height: 100%; transition: width .8s ease; }
+
+  /* ---- the wings: this slot's two players ---- */
+  .wing { flex: 1 1 0; min-width: 0; height: 2.92em; box-sizing: border-box; position: relative;
+          display: flex; flex-direction: column; justify-content: center; overflow: hidden;
+          transition: opacity .35s ease; }
+  .wing.fade, .sm.fade { opacity: 0; }
+  .wing::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: .09em; background: var(--c); }
+  .wing.l { margin-right: .18em; padding: 0 .6em 0 1.35em;
+            background: linear-gradient(90deg, var(--cs) 0, rgba(10,12,18,var(--op)) 58%);
+            clip-path: polygon(.95em 0, 100% 0, 100% 100%, 0 100%); }
+  .wing.r { margin-left: .18em; padding: 0 1.35em 0 .6em;
+            background: linear-gradient(270deg, var(--cs) 0, rgba(10,12,18,var(--op)) 58%);
+            clip-path: polygon(0 0, calc(100% - .95em) 0, 100% 100%, 0 100%); }
+  .row { display: flex; align-items: center; min-width: 0; white-space: nowrap; }
+  .wing.r .row { flex-direction: row-reverse; }
+  .slot { flex: 0 0 auto; min-width: 2.9em; box-sizing: border-box; text-align: center; padding: .08em .35em;
+          border-radius: .3em; font-size: .5em; font-weight: 800; letter-spacing: .1em; color: #fff;
+          background: var(--cs); border: 1px solid var(--c); }
+  .pn { flex: 1 1 auto; min-width: 0; margin: 0 .45em; font-size: .78em; font-weight: 700; overflow: hidden;
+        text-overflow: ellipsis; }
+  .wing.r .pn { text-align: right; }
+  .st .t { color: #d7dce5; margin-right: .7em; }
+  .pp { flex: 0 0 auto; min-width: 2em; text-align: center; font-size: 1.05em; font-weight: 800; }
+  .pp.w { color: #2ecc71; }
+  .row2 { margin-top: .28em; }
+  .st { flex: 0 0 auto; min-width: 7em; font-size: .44em; font-weight: 700; letter-spacing: .1em; color: #9aa3b2; }
+  .wing.r .st { text-align: right; }
+  .st.live { color: #ff6b5b; } .st .ld { width: .8em; height: .8em; }
+  .st.final { color: #7a8292; }
+  .bar { flex: 1 1 auto; height: .14em; margin: 0 .55em; border-radius: .1em; overflow: hidden;
+         background: rgba(255,255,255,.12); display: flex; }
+  .wing.r .bar { justify-content: flex-end; }
+  .bar i { display: block; height: 100%; background: var(--c); }
+  .bar.over i { background: #f5c542; }
+  .pjn { flex: 0 0 auto; min-width: 4.8em; font-size: .44em; color: #9aa3b2; letter-spacing: .06em; text-align: center; }
+  .empty { color: #6f7888; font-style: italic; }
+  body.nowings .wing { display: none; }
+</style></head>
+<body><div id="sb"><div id="stage">
+  <div class="wing l" id="wl"></div>
+  <div id="pod"><div id="prog"></div><div id="pc"></div></div>
+  <div class="wing r" id="wr"></div>
+</div></div>
+<script>
+const $ = s => document.getElementById(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+let data = null, idx = 0, lastOk = Date.now(), refresh = 5, cycle = 10, lastHdr = "", lastRow = "";
+
+function rgb(hex) {
+  hex = String(hex || "").replace("#", "");
+  return /^[0-9a-f]{6}$/i.test(hex) ? [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16)) : [143, 162, 196];
+}
+const rgba = (c, a) => "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a + ")";
+const colorVars = c => "--c:" + rgba(c, 1) + ";--cs:" + rgba(c, .4);
+const f1 = n => Number(n).toFixed(1);
+
+function teamHtml(t, side, c, lead) {
+  const logo = /^https?:\/\//.test(t.logo || "")
+    ? '<img src="' + esc(t.logo) + '" alt="" onload="this.parentNode.classList.add(\'ok\')" onerror="this.remove()">' : "";
+  const rec = (t.record ? '<span class="r1">' + esc(t.record) + '</span>' : "") + '<span class="r2">' + counts(t) + '</span>';
+  return '<div class="team ' + (side === "me" ? "a" : "h") + (lead > 0 ? " lead" : lead < 0 ? " trail" : "") +
+    '" style="' + colorVars(c) + '"><span class="stripe"></span>' +
+    '<span class="lg"><span>' + esc(String(t.abbr || t.name).slice(0, 1)) + '</span>' + logo + '</span>' +
+    '<div class="nmcol"><div class="ab">' + esc(t.abbr || t.name) + '</div><div class="rec">' + rec + '</div></div>' +
+    '<span class="sc">' + f1(t.score) + '</span></div>';
 }
 
 function counts(t) {
-  const live = t.live ? '<b>' + t.live + ' live</b> · ' : '';
-  return '<span class="cnt">' + live + t.left + ' left</span>';
-}
-
-function winPct(w) {
-  if (w === undefined || w === null) return '';
-  return ' · <b class="' + (w >= 50 ? 'wp' : 'lp') + '">' + w + '% WIN</b>';
+  return (t.live ? '<b><i class="ld"></i>' + t.live + ' live</b> · ' : "") + t.left + " left";
 }
 
 function header(d) {
-  const diff = d.me.score - d.opp.score;
-  const pill = diff > 0 ? '<span class="pill up">+' + diff.toFixed(1) + '</span>'
-             : diff < 0 ? '<span class="pill down">−' + (-diff).toFixed(1) + '</span>'
-             : '<span class="pill tie">TIED</span>';
-  $("#hdr").innerHTML =
-    '<div class="half"><span class="nm">' + esc(d.me.name) + '</span>' + counts(d.me) +
-      '<span class="sc' + (diff > 0 ? ' win' : '') + '">' + d.me.score.toFixed(1) + '</span></div>' +
-    '<div class="ctr"><span class="wk">WK ' + d.week + winPct(d.win) + '</span>' + pill + '</div>' +
-    '<div class="half r"><span class="nm">' + esc(d.opp.name) + '</span>' + counts(d.opp) +
-      '<span class="sc' + (diff < 0 ? ' win' : '') + '">' + d.opp.score.toFixed(1) + '</span></div>';
+  const diff = d.me.score - d.opp.score, cm = rgb(d.colors.me), co = rgb(d.colors.opp);
+  const mg = diff > 0 ? '<span class="up">+' + f1(diff) + '</span>'
+           : diff < 0 ? '<span class="down">−' + f1(-diff) + '</span>' : '<span class="tie">TIED</span>';
+  const win = d.win == null ? "" :
+    '<span class="badge ' + (d.win > 50 ? "up" : d.win < 50 ? "down" : "") + '">' + d.win + '% WIN</span>';
+  const wp = d.win == null ? '<div class="wpb"></div>' :
+    '<div class="wpb"><i style="width:' + d.win + '%;background:' + rgba(cm, .95) + '"></i>' +
+    '<i style="width:' + (100 - d.win) + '%;background:' + rgba(co, .95) + '"></i></div>';
+  const html = '<div class="main">' + teamHtml(d.me, "me", cm, diff) +
+    '<div class="mid"><div class="clk"><b>WK ' + esc(d.week) + '</b>' + mg + '</div>' + win + '</div>' +
+    teamHtml(d.opp, "opp", co, -diff) + '</div>' +
+    '<div class="strip"><span class="pj">PROJ <b>' + f1(d.me.proj) + '</b><span class="cnt"> · ' + counts(d.me) + '</span></span>' +
+    '<span class="sm" id="sm"></span><span class="pj"><span class="cnt">' + counts(d.opp) + ' · </span>PROJ <b>' +
+    f1(d.opp.proj) + '</b></span></div>' + wp;
+  if (html === lastHdr) return;
+  lastHdr = html;
+  $("pc").innerHTML = html;
+  $("wl").setAttribute("style", colorVars(cm));
+  $("wr").setAttribute("style", colorVars(co));
+  lastRow = "";
 }
 
-// Halves are built outside-in: name, proj, pts (the right half is mirrored with row-reverse)
-function half(p, other, right) {
-  if (!p) return '<div class="half' + (right ? ' r' : '') + '"><span class="nm empty">Empty</span></div>';
-  const win = other && p.pts > other.pts ? " win" : "";
-  const name = right
-    ? st(p) + '<span class="t">' + esc(p.team) + '</span>' + esc(p.name)
-    : esc(p.name) + '<span class="t">' + esc(p.team) + '</span>' + st(p);
-  return '<div class="half' + (right ? ' r' : '') + '">' +
-         '<span class="nm">' + name + '</span>' +
-         '<span class="num proj">' + p.proj.toFixed(1) + '</span>' +
-         '<span class="num pts' + win + '">' + p.pts.toFixed(1) + '</span></div>';
+function status(p) {
+  const t = p.team ? '<span class="t">' + esc(p.team) + '</span>' : "";
+  if (p.status === "live") return '<span class="st live">' + t + '<i class="ld"></i>LIVE</span>';
+  if (p.status === "final") return '<span class="st final">' + t + 'FINAL</span>';
+  return '<span class="st">' + t + esc(p.label) + '</span>';
 }
 
-function rowHtml(r) {
-  return half(r.me, r.opp, false) + '<div class="ctr"><span class="slot">' + esc(r.slot) + '</span></div>' + half(r.opp, r.me, true);
+function wing(p, other, slot) {
+  const chip = '<span class="slot">' + esc(slot) + '</span>';
+  if (!p) return '<div class="row">' + chip + '<span class="pn empty">Empty</span></div>';
+  const fill = p.proj > 0 ? Math.min(100, Math.round(100 * Math.max(p.pts, 0) / p.proj)) : (p.pts > 0 ? 100 : 0);
+  const won = other && p.pts > other.pts ? " w" : "";
+  const name = String(p.name).replace(/ D\/ST$/, "");   // the chip already says D/ST
+  return '<div class="row">' + chip + '<span class="pn">' + esc(name) + '</span>' +
+    '<span class="pp' + won + '">' + f1(p.pts) + '</span></div>' +
+    '<div class="row row2">' + status(p) + '<span class="bar' + (p.proj > 0 && p.pts > p.proj ? " over" : "") +
+    '"><i style="width:' + fill + '%"></i></span><span class="pjn">PROJ ' + f1(p.proj) + '</span></div>';
+}
+
+// The slot's matchup in one line, for the strip when the bar is too narrow for the wings
+function oneLine(r, n, total) {
+  const side = (p, o) => p ? esc(p.name) + ' <b class="' + (o && p.pts > o.pts ? "w" : "") + '">' + f1(p.pts) + '</b>'
+                           : '<i class="empty">Empty</i>';
+  return '<span class="long">' + esc(r.slot) + ' · ' + n + '/' + total + '</span><span class="short">' +
+    side(r.me, r.opp) + '<span class="chip">' + esc(r.slot) + '</span>' + side(r.opp, r.me) + '</span>';
 }
 
 function showRow(animate) {
   if (!data || !data.rows.length) return;
   idx = idx % data.rows.length;
-  const html = rowHtml(data.rows[idx]);
-  const row = $("#row");
-  if (!animate) { row.innerHTML = html; fit(); return; }
-  row.classList.add("fade");
-  setTimeout(() => { row.innerHTML = html; fit(); row.classList.remove("fade"); }, 350);
+  const r = data.rows[idx];
+  const key = JSON.stringify(r) + idx + "|" + data.rows.length;
+  if (!animate && key === lastRow) return;
+  const els = [$("wl"), $("wr"), $("sm")];
+  const put = () => {
+    lastRow = key;
+    $("wl").innerHTML = wing(r.me, r.opp, r.slot);
+    $("wr").innerHTML = wing(r.opp, r.me, r.slot);
+    $("sm").innerHTML = oneLine(r, idx + 1, data.rows.length);
+    fit();
+    els.forEach(el => el.classList.remove("fade"));
+  };
+  if (!animate) return put();
+  els.forEach(el => el.classList.add("fade"));
+  setTimeout(put, 350);
 }
 
 function overflowing() {
-  // Shrink if the bar is too tall, or if any line's fixed parts (numbers, center) don't fit
-  const bar = $("#bar");
-  if (bar.offsetHeight > window.innerHeight - 1) return true;
-  for (const line of document.querySelectorAll(".line"))
-    if (line.scrollWidth > line.clientWidth + 1) return true;
+  if ($("stage").scrollHeight > window.innerHeight + 1) return true;
+  for (const el of document.querySelectorAll(".main, .clk, .ab, .sc"))
+    if (el.offsetParent && el.scrollWidth > el.clientWidth + 1) return true;
+  for (const el of document.querySelectorAll(".wing .pn"))
+    if (el.offsetParent && el.clientWidth < parseFloat(document.body.style.fontSize) * 4.4) return true;
   return false;
 }
 
-function fit() {
-  let fs = window.innerHeight / 3.6;
+function fitAt(wings) {
+  document.body.classList.toggle("nowings", !wings);
+  let fs = window.innerHeight / 3.75;
   document.body.style.fontSize = fs + "px";
-  while (overflowing() && fs > 6) {
-    fs -= 0.5;
-    document.body.style.fontSize = fs + "px";
-  }
+  while (overflowing() && fs > 6) { fs -= .5; document.body.style.fontSize = fs + "px"; }
+  return fs;
+}
+
+// Full size with the player wings if they fit; if they'd squeeze the text much, drop them
+// and show the player matchup in the strip instead
+function fit() {
+  const full = window.innerHeight / 3.75, withWings = fitAt(true);
+  if (withWings >= full * .85) return;
+  if (fitAt(false) <= withWings + .5) fitAt(true);
 }
 
 function progress() {
-  const p = $("#prog");
+  const p = $("prog");
   p.classList.remove("run"); p.style.transitionDuration = "0s"; void p.offsetWidth;
   p.style.transitionDuration = cycle + "s"; p.classList.add("run");
 }
@@ -374,15 +489,15 @@ async function poll() {
     if (d.ready) {
       document.documentElement.style.setProperty("--op", d.opacity);
       const first = !data;
-      data = d; refresh = d.refresh || 5; cycle = d.cycle || 5;
+      data = d; refresh = d.refresh || 5; cycle = d.cycle || 10;
       header(d);
       showRow(false);
       if (first) { setTimeout(rotate, cycle * 1000); progress(); }
       lastOk = Date.now();
-      $("#bar").classList.remove("lost");
+      $("sb").classList.remove("lost");
     }
   } catch (e) {
-    if (Date.now() - lastOk > 30000) $("#bar").classList.add("lost");
+    if (Date.now() - lastOk > 30000) $("sb").classList.add("lost");
   }
   setTimeout(poll, refresh * 1000);
 }
@@ -394,7 +509,7 @@ function rotate() {
   setTimeout(rotate, cycle * 1000);
 }
 
-window.addEventListener("resize", fit);
+window.addEventListener("resize", () => { lastRow = ""; showRow(false); });
 poll();
 </script></body></html>
 """
