@@ -31,41 +31,16 @@ import requests
 from espn_api.football import League
 from espn_api.football.constant import PRO_TEAM_MAP
 
-# ======================= CONFIG =======================
-TV_IP = "192.168.1.50"       # your Android TV box IP (example)
-LEAGUE_ID = 123456           # from the URL on fantasy.espn.com: ...?leagueId=123456
-YEAR = 2026
-MY_TEAM = "Team Name"        # all or part of your team name (case-insensitive)
-
-# Private leagues: paste in quotes. Public league: leave as None.
-ESPN_S2 = None
-SWID = None                  # keep the { } braces
-
-FETCH_SECONDS = 30           # how often to pull fresh scores from ESPN
-CYCLE_SECONDS = 10           # how long each player matchup stays up before rotating
-PAGE_REFRESH_SECONDS = 5     # how often the panel picks up new scores from this script
-ONLY_DURING_GAMES = True     # False = keep the panel up even when no one is playing
-
-POSITION = 5                 # 5 = top center (0-8 grid: 0 top right, 1 top left, 2 bottom right,
-                             #   3 bottom left, 4 center, 5 top center, ...)
-PANEL_WIDTH = 1240           # panel size on the TV; text scales to fit. Too narrow for the player
-PANEL_HEIGHT = 96            #   wings and they drop off; the player matchup moves under the score
-PANEL_OPACITY = 0.85         # player wings' background darkness (0-1)
-MY_COLOR = "2f80ed"          # accent colors (hex) for your team and your opponent
-OPP_COLOR = "f2994a"
-WIN_SPREAD = 0.7             # win % volatility: higher = less confident estimate
-
-WEB_PORT = 8765
-PC_IP = None                 # None = auto-detect this PC's LAN address
-# ======================================================
-
-# Keep your real values (especially ESPN_S2 / SWID) out of git:
-# put any of the settings above in a file named overlay_config.py next to
-# this script. It overrides the defaults and is listed in .gitignore.
+# ======================= SETTINGS =======================
+# Every setting, its default and what it does is in default_config.py. Change them in your own
+# overlay_config.py next to this script (copy overlay_config.example.py to start); it overrides
+# the defaults and is in .gitignore, so your logins stay out of git and updates never touch it.
+from default_config import *  # noqa: F401,F403
 try:
     from overlay_config import *  # noqa: F401,F403
 except ImportError:
     pass
+# ========================================================
 
 CARD_ID = "fantasy"
 BENCH = {"BE", "IR"}

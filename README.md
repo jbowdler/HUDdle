@@ -109,7 +109,9 @@ ESPN_S2 = None                # private leagues only
 SWID = None                   # private leagues only
 ```
 
-`overlay_config.py` is in `.gitignore`, so your ESPN cookies never end up in a commit.
+`overlay_config.py` is in `.gitignore`, so your ESPN cookies never end up in a commit, and updating HUDdle never overwrites your settings.
+
+Every setting both scripts use is listed in `default_config.py`, with its default and a note on what it does. Don't edit that file: copy the lines you want to change into `overlay_config.py`, which overrides it.
 
 **Private leagues** need two login cookies. Log in at fantasy.espn.com in Chrome or Edge, press **F12 → Application → Cookies → https://fantasy.espn.com**, and copy the values of `espn_s2` and `SWID` (keep the curly braces on SWID). Treat them like a password.
 
@@ -131,7 +133,7 @@ To run it in the background on Windows, use `pythonw fantasy_overlay.py` (stop i
 
 ## Settings
 
-Any of these can go in `overlay_config.py`.
+Any of these can go in `overlay_config.py`. All of them, with their defaults and notes, are in `default_config.py`.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -291,7 +293,7 @@ If a nickname isn't being recognized, add it as an alias: `CFB_TEAM_ALIASES = {"
 
 ### Replay settings
 
-Any of these can go in `overlay_config.py`.
+Any of these can go in `overlay_config.py`. All of them, with their defaults and notes, are in `default_config.py`.
 
 | Setting | Default | What it does |
 | --- | --- | --- |

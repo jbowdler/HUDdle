@@ -1,5 +1,7 @@
 # Copy this file to overlay_config.py and fill in your values.
-# overlay_config.py is git-ignored, so your ESPN cookies never get committed.
+# overlay_config.py is git-ignored, so your ESPN cookies never get committed, and updating
+# HUDdle never overwrites it. Every setting, with its default and what it does, is listed in
+# default_config.py: copy any line from there into this file to change it.
 
 TV_IP = "192.168.1.50"        # your Android TV box's IP
 LEAGUE_ID = 1234567           # number after leagueId= in your league's URL
@@ -10,7 +12,7 @@ MY_TEAM = "Your Team Name"    # all or part of your ESPN team name
 ESPN_S2 = None                # "AEB..."
 SWID = None                   # "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"
 
-# Any other setting from the top of fantasy_overlay.py can be overridden here too, e.g.:
+# Any other setting from default_config.py can be changed here too, e.g.:
 # CYCLE_SECONDS = 10
 # POSITION = 8
 
