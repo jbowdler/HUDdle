@@ -29,42 +29,18 @@ from itertools import zip_longest
 
 import requests
 from espn_api.football import League
+from espn_api.football.constant import PRO_TEAM_MAP
 
-# ======================= CONFIG =======================
-TV_IP = "192.168.1.50"       # your Android TV box IP (example)
-LEAGUE_ID = 123456           # from the URL on fantasy.espn.com: ...?leagueId=123456
-YEAR = 2026
-MY_TEAM = "Team Name"        # all or part of your team name (case-insensitive)
-
-# Private leagues: paste in quotes. Public league: leave as None.
-ESPN_S2 = None
-SWID = None                  # keep the { } braces
-
-FETCH_SECONDS = 30           # how often to pull fresh scores from ESPN
-CYCLE_SECONDS = 10           # how long each player matchup stays up before rotating
-PAGE_REFRESH_SECONDS = 5     # how often the panel picks up new scores from this script
-ONLY_DURING_GAMES = True     # False = keep the panel up even when no one is playing
-
-POSITION = 5                 # 5 = top center (0-8 grid: 0 top right, 1 top left, 2 bottom right,
-                             #   3 bottom left, 4 center, 5 top center, ...)
-PANEL_WIDTH = 1240           # panel size on the TV; text scales to fit. Too narrow for the player
-PANEL_HEIGHT = 96            #   wings and they drop off; the player matchup moves under the score
-PANEL_OPACITY = 0.85         # player wings' background darkness (0-1)
-MY_COLOR = "2f80ed"          # accent colors (hex) for your team and your opponent
-OPP_COLOR = "f2994a"
-WIN_SPREAD = 0.7             # win % volatility: higher = less confident estimate
-
-WEB_PORT = 8765
-PC_IP = None                 # None = auto-detect this PC's LAN address
-# ======================================================
-
-# Keep your real values (especially ESPN_S2 / SWID) out of git:
-# put any of the settings above in a file named overlay_config.py next to
-# this script. It overrides the defaults and is listed in .gitignore.
+# ======================= SETTINGS =======================
+# Every setting, its default and what it does is in default_config.py. Change them in your own
+# overlay_config.py next to this script (copy overlay_config.example.py to start); it overrides
+# the defaults and is in .gitignore, so your logins stay out of git and updates never touch it.
+from default_config import *  # noqa: F401,F403
 try:
     from overlay_config import *  # noqa: F401,F403
 except ImportError:
     pass
+# ========================================================
 
 CARD_ID = "fantasy"
 BENCH = {"BE", "IR"}
@@ -73,6 +49,10 @@ SLOT_ORDER = ["QB", "RB", "WR", "TE", "RB/WR/TE", "WR/TE", "RB/WR", "OP",
               "D/ST", "K", "DL", "LB", "DB", "DP", "HC", "P"]
 SLOT_LABEL = {"RB/WR/TE": "FLEX", "WR/TE": "W/T", "RB/WR": "W/R", "OP": "SFLX"}
 SAFETY_SECONDS = FETCH_SECONDS * 3   # panel clears itself if the script stops
+
+NFL_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+PRO_TEAM_IDS = {abbr: str(tid) for tid, abbr in PRO_TEAM_MAP.items() if tid}
+GAME_LEFT = {}               # NFL team id or abbreviation -> fraction of its game still to play (0-1)
 
 STATE = {"ready": False}
 STATE_LOCK = threading.Lock()
@@ -141,12 +121,64 @@ def status_of(p):
     return "final", "FINAL"
 
 
+def fetch_game_left():
+    """{NFL team id and abbreviation: fraction of its game still to play} from ESPN's NFL
+    scoreboard: 1 before kickoff, 0 once final, and in between from the quarter and clock."""
+    r = requests.get(NFL_SCOREBOARD, timeout=10)
+    r.raise_for_status()
+    left = {}
+    for ev in r.json().get("events", []):
+        comp = (ev.get("competitions") or [{}])[0]
+        st = ev.get("status") or comp.get("status") or {}
+        state = (st.get("type") or {}).get("state")
+        if state == "pre":
+            frac = 1.0
+        elif state == "post":
+            frac = 0.0
+        else:
+            try:
+                period, clock = int(st.get("period") or 1), float(st.get("clock") or 0)  # clock = seconds left
+            except (TypeError, ValueError):
+                continue
+            frac = min(1.0, max(0.0, ((4 - period) * 900 + clock) / 3600)) if period <= 4 else 0.0
+        for c in comp.get("competitors", []):
+            t = c.get("team") or {}
+            for key in (str(t.get("id") or ""), str(t.get("abbreviation") or "").upper()):
+                if key:
+                    left[key] = frac
+    return left
+
+
+def game_left(p):
+    """Fraction of a player's game still to play: from the NFL scoreboard's quarter and clock,
+    or estimated from the kickoff time if the scoreboard doesn't have his game."""
+    k = kickoff(p)
+    if not k:
+        return 0.0  # bye
+    for key in (PRO_TEAM_IDS.get(p.proTeam), str(p.proTeam).upper()):
+        if key in GAME_LEFT:
+            return GAME_LEFT[key]
+    now = datetime.now()
+    if now < k:
+        return 1.0
+    if now >= k + GAME_LENGTH:
+        return 0.0
+    return max(0.0, 1 - (now - k) / timedelta(hours=3))
+
+
+def live_projection(p):
+    """ESPN only gives each player a pregame projection. Like ESPN's own live projections,
+    this keeps what he has scored and adds his pregame projection for the part of his game left."""
+    return p.points + p.projected_points * game_left(p)
+
+
 def player_dict(p):
     if p is None:
         return None
     st, label = status_of(p)
     return {"name": short_name(p), "team": p.proTeam, "pts": round(p.points, 1),
-            "proj": round(p.projected_points, 1), "status": st, "label": label}
+            "proj": round(live_projection(p), 1), "proj0": round(p.projected_points, 1),
+            "status": st, "label": label}
 
 
 def lineup_rows(my_lineup, opp_lineup):
@@ -177,14 +209,9 @@ def remaining_sd(lineup):
     """Rough uncertainty in a team's remaining points.
     Each player still to play adds spread proportional to the points they still
     have left to score (full projection if not started, partial if mid-game)."""
-    now = datetime.now()
     var = 0.0
     for p in starters(lineup):
-        k = kickoff(p)
-        if not k or now >= k + GAME_LENGTH:
-            continue  # bye or final
-        frac_left = 1.0 if now < k else max(0.0, 1 - (now - k) / timedelta(hours=3))
-        var += (WIN_SPREAD * p.projected_points * frac_left) ** 2
+        var += (WIN_SPREAD * p.projected_points * game_left(p)) ** 2   # 0 for byes and finals
     return math.sqrt(var)
 
 
@@ -419,7 +446,7 @@ function wing(p, other, slot) {
   const name = String(p.name).replace(/ D\/ST$/, "");   // the chip already says D/ST
   return '<div class="row">' + chip + '<span class="pn">' + esc(name) + '</span>' +
     '<span class="pp' + won + '">' + f1(p.pts) + '</span></div>' +
-    '<div class="row row2">' + status(p) + '<span class="bar' + (p.proj > 0 && p.pts > p.proj ? " over" : "") +
+    '<div class="row row2">' + status(p) + '<span class="bar' + (p.proj0 > 0 && p.pts > p.proj0 ? " over" : "") +
     '"><i style="width:' + fill + '%"></i></span><span class="pjn">PROJ ' + f1(p.proj) + '</span></div>';
 }
 
@@ -594,6 +621,7 @@ def main():
     connected_at = time.time()
     showing = False
     last_log = None
+    clock_warned = False
     print(f"Watching league {LEAGUE_ID} for '{MY_TEAM}'. Ctrl+C to stop.")
 
     try:
@@ -605,6 +633,16 @@ def main():
 
                 week = league.current_week
                 boxes = league.box_scores(week)
+                try:
+                    left = fetch_game_left()
+                    clock_warned = False
+                except (requests.RequestException, ValueError) as e:
+                    left = {}
+                    if not clock_warned:
+                        print(f"Couldn't load the NFL scoreboard ({e}); estimating game clocks from kickoff times")
+                        clock_warned = True
+                GAME_LEFT.clear()
+                GAME_LEFT.update(left)
                 box, mine = find_my_box(boxes)
 
                 if not box:

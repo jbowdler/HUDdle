@@ -12,7 +12,7 @@ HUDdle puts a scoreboard bar at the top of your TV while you watch the game, in 
 ## Features
 
 - **Matchup in the middle:** both teams' logos, records and scores, the margin, estimated win % (also drawn as a bar in the two teams' colors), projected totals, players live and players left
-- **Rotating player matchups on the sides:** your starter on the left, your opponent's on the right, with points, projections, a bar showing how close each player is to his projection (gold once he passes it), and game status (live, final, kickoff time)
+- **Rotating player matchups on the sides:** your starter on the left, your opponent's on the right, with points, a live projection, a bar showing how close each player is to it (gold once he beats his pregame projection), and game status (live, final, kickoff time). ESPN only publishes a pregame projection per player, so during a game HUDdle works out the live one like ESPN's app does: points so far plus the pregame projection for the part of his game still to play, using the quarter and clock from ESPN's NFL scoreboard
 - **Same look as the college football scoreboard**, so the two bars match if you run both
 - **Works over any app**, because the bar is a system overlay, not part of a video player
 - **No flicker:** the bar is drawn once and updates its numbers in place
@@ -109,7 +109,9 @@ ESPN_S2 = None                # private leagues only
 SWID = None                   # private leagues only
 ```
 
-`overlay_config.py` is in `.gitignore`, so your ESPN cookies never end up in a commit.
+`overlay_config.py` is in `.gitignore`, so your ESPN cookies never end up in a commit, and updating HUDdle never overwrites your settings.
+
+Every setting both scripts use is listed in `default_config.py`, with its default and a note on what it does. Don't edit that file: copy the lines you want to change into `overlay_config.py`, which overrides it.
 
 **Private leagues** need two login cookies. Log in at fantasy.espn.com in Chrome or Edge, press **F12 → Application → Cookies → https://fantasy.espn.com**, and copy the values of `espn_s2` and `SWID` (keep the curly braces on SWID). Treat them like a password.
 
@@ -131,7 +133,7 @@ To run it in the background on Windows, use `pythonw fantasy_overlay.py` (stop i
 
 ## Settings
 
-Any of these can go in `overlay_config.py`.
+Any of these can go in `overlay_config.py`. All of them, with their defaults and notes, are in `default_config.py`.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -154,7 +156,7 @@ Any of these can go in `overlay_config.py`.
 
 ## About the win %
 
-ESPN's API doesn't expose its own win probability, so HUDdle estimates one. It starts from ESPN's live projected totals and widens the uncertainty for every point still in play: a player who hasn't kicked off counts fully, one mid-game counts partly, and a finished player not at all. It's in the same ballpark as the ESPN app but won't match it exactly.
+ESPN's API doesn't expose its own win probability, so HUDdle estimates one. It starts from ESPN's live projected totals and widens the uncertainty for every point still in play: a player who hasn't kicked off counts fully, one mid-game counts for the share of his game left (from the NFL scoreboard's quarter and clock), and a finished player not at all. It's in the same ballpark as the ESPN app but won't match it exactly.
 
 ## College football replays
 
@@ -291,7 +293,7 @@ If a nickname isn't being recognized, add it as an alias: `CFB_TEAM_ALIASES = {"
 
 ### Replay settings
 
-Any of these can go in `overlay_config.py`.
+Any of these can go in `overlay_config.py`. All of them, with their defaults and notes, are in `default_config.py`.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
