@@ -166,10 +166,21 @@ def game_left(p):
     return max(0.0, 1 - (now - k) / timedelta(hours=3))
 
 
+# Scored as if the game ended now, not added up play by play: a defense starts at its best
+# points-allowed tier and loses points as the other team scores and gains yards; a head coach
+# is scored on the final result
+SETTLE_AT_END = {"D/ST", "HC"}
+
+
 def live_projection(p):
-    """ESPN only gives each player a pregame projection. Like ESPN's own live projections,
-    this keeps what he has scored and adds his pregame projection for the part of his game left."""
-    return p.points + p.projected_points * game_left(p)
+    """ESPN only gives each player a pregame projection, so the live one is worked out here.
+    Most players add up points as they go: keep what he has scored and add his pregame
+    projection for the part of his game left. Defenses and head coaches show what they'd score
+    if the game ended now, so move from the pregame projection toward that as the game runs out."""
+    left = game_left(p)
+    if SETTLE_AT_END & {getattr(p, "position", ""), getattr(p, "slot_position", "")}:
+        return p.points * (1 - left) + p.projected_points * left
+    return p.points + p.projected_points * left
 
 
 def player_dict(p):
