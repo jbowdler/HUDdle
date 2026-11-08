@@ -52,7 +52,7 @@ SAFETY_SECONDS = FETCH_SECONDS * 3   # panel clears itself if the script stops
 
 NFL_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 PRO_TEAM_IDS = {abbr: str(tid) for tid, abbr in PRO_TEAM_MAP.items() if tid}
-GAME_LEFT = {}               # NFL team id or abbreviation -> fraction of its game still to play (0-1)
+GAME_LEFT = {}               # NFL team id or abbreviation -> {"state", "left", "kickoff"} for its game
 
 STATE = {"ready": False}
 STATE_LOCK = threading.Lock()
@@ -75,14 +75,11 @@ def kickoff(p):
 
 
 def left_to_play(lineup):
-    now = datetime.now()
-    return sum(1 for p in starters(lineup) if kickoff(p) and kickoff(p) > now)
+    return sum(1 for p in starters(lineup) if game_state(p) == "pre")
 
 
 def in_progress(lineup):
-    now = datetime.now()
-    return any(kickoff(p) and kickoff(p) <= now < kickoff(p) + GAME_LENGTH
-               for p in starters(lineup))
+    return any(game_state(p) == "in" for p in starters(lineup))
 
 
 def find_my_box(boxes):
@@ -109,21 +106,22 @@ def short_name(p):
 
 
 def status_of(p):
-    k = kickoff(p)
-    if not k:
+    state = game_state(p)
+    if state == "bye":
         return "bye", "BYE"
-    now = datetime.now()
-    if now < k:
+    if state == "pre":
+        k, now = kickoff(p), datetime.now()
         t = f"{k.hour % 12 or 12}:{k:%M}"
         return "upcoming", t if k.date() == now.date() else f"{k:%a} {t}"
-    if now < k + GAME_LENGTH:
+    if state == "in":
         return "live", "LIVE"
     return "final", "FINAL"
 
 
 def fetch_game_left():
-    """{NFL team id and abbreviation: fraction of its game still to play} from ESPN's NFL
-    scoreboard: 1 before kickoff, 0 once final, and in between from the quarter and clock."""
+    """{NFL team id and abbreviation: its game} from ESPN's NFL scoreboard: the game's state
+    (pre / in / post), its kickoff, and the fraction of it still to play (1 before kickoff,
+    0 once final, and in between from the quarter and clock)."""
     r = requests.get(NFL_SCOREBOARD, timeout=10)
     r.raise_for_status()
     left = {}
@@ -141,12 +139,40 @@ def fetch_game_left():
             except (TypeError, ValueError):
                 continue
             frac = min(1.0, max(0.0, ((4 - period) * 900 + clock) / 3600)) if period <= 4 else 0.0
+        try:   # local time, to compare with espn_api's kickoff times
+            kick = datetime.fromisoformat((ev.get("date") or "").replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        except ValueError:
+            kick = None
+        game = {"state": state, "left": frac, "kickoff": kick}
         for c in comp.get("competitors", []):
             t = c.get("team") or {}
             for key in (str(t.get("id") or ""), str(t.get("abbreviation") or "").upper()):
                 if key:
-                    left[key] = frac
+                    left[key] = game
     return left
+
+
+def scoreboard_game(p):
+    """The player's game on the NFL scoreboard, or None if it isn't there. Early in the week the
+    scoreboard can already show next week's games, so it must kick off when the player's does."""
+    k = kickoff(p)
+    for key in (PRO_TEAM_IDS.get(p.proTeam), str(p.proTeam).upper()):
+        g = GAME_LEFT.get(key)
+        if g and k and (g["kickoff"] is None or abs(g["kickoff"] - k) < timedelta(hours=6)):
+            return g
+    return None
+
+
+def game_state(p):
+    """bye, pre, in or post: from the NFL scoreboard, or estimated from the kickoff time."""
+    k = kickoff(p)
+    if not k:
+        return "bye"
+    g = scoreboard_game(p)
+    if g and g["state"] in ("pre", "in", "post"):
+        return g["state"]
+    now = datetime.now()
+    return "pre" if now < k else "in" if now < k + GAME_LENGTH else "post"
 
 
 def game_left(p):
@@ -155,9 +181,9 @@ def game_left(p):
     k = kickoff(p)
     if not k:
         return 0.0  # bye
-    for key in (PRO_TEAM_IDS.get(p.proTeam), str(p.proTeam).upper()):
-        if key in GAME_LEFT:
-            return GAME_LEFT[key]
+    g = scoreboard_game(p)
+    if g:
+        return g["left"]
     now = datetime.now()
     if now < k:
         return 1.0
@@ -187,8 +213,11 @@ def player_dict(p):
     if p is None:
         return None
     st, label = status_of(p)
+    # Once his game is over, show what he was projected to score before it, to compare with
+    # what he did; during the game, the live projection
+    proj = p.projected_points if st == "final" else live_projection(p)
     return {"name": short_name(p), "team": p.proTeam, "pts": round(p.points, 1),
-            "proj": round(live_projection(p), 1), "proj0": round(p.projected_points, 1),
+            "proj": round(proj, 1), "proj0": round(p.projected_points, 1),
             "status": st, "label": label}
 
 
@@ -211,9 +240,7 @@ def lineup_rows(my_lineup, opp_lineup):
 
 
 def live_count(lineup):
-    now = datetime.now()
-    return sum(1 for p in starters(lineup)
-               if kickoff(p) and kickoff(p) <= now < kickoff(p) + GAME_LENGTH)
+    return sum(1 for p in starters(lineup) if game_state(p) == "in")
 
 
 def remaining_sd(lineup):
