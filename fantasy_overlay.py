@@ -29,6 +29,7 @@ from itertools import zip_longest
 
 import requests
 from espn_api.football import League
+from espn_api.football.constant import PRO_TEAM_MAP
 
 # ======================= CONFIG =======================
 TV_IP = "192.168.1.50"       # your Android TV box IP (example)
@@ -73,6 +74,10 @@ SLOT_ORDER = ["QB", "RB", "WR", "TE", "RB/WR/TE", "WR/TE", "RB/WR", "OP",
               "D/ST", "K", "DL", "LB", "DB", "DP", "HC", "P"]
 SLOT_LABEL = {"RB/WR/TE": "FLEX", "WR/TE": "W/T", "RB/WR": "W/R", "OP": "SFLX"}
 SAFETY_SECONDS = FETCH_SECONDS * 3   # panel clears itself if the script stops
+
+NFL_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+PRO_TEAM_IDS = {abbr: str(tid) for tid, abbr in PRO_TEAM_MAP.items() if tid}
+GAME_LEFT = {}               # NFL team id or abbreviation -> fraction of its game still to play (0-1)
 
 STATE = {"ready": False}
 STATE_LOCK = threading.Lock()
@@ -141,12 +146,64 @@ def status_of(p):
     return "final", "FINAL"
 
 
+def fetch_game_left():
+    """{NFL team id and abbreviation: fraction of its game still to play} from ESPN's NFL
+    scoreboard: 1 before kickoff, 0 once final, and in between from the quarter and clock."""
+    r = requests.get(NFL_SCOREBOARD, timeout=10)
+    r.raise_for_status()
+    left = {}
+    for ev in r.json().get("events", []):
+        comp = (ev.get("competitions") or [{}])[0]
+        st = ev.get("status") or comp.get("status") or {}
+        state = (st.get("type") or {}).get("state")
+        if state == "pre":
+            frac = 1.0
+        elif state == "post":
+            frac = 0.0
+        else:
+            try:
+                period, clock = int(st.get("period") or 1), float(st.get("clock") or 0)  # clock = seconds left
+            except (TypeError, ValueError):
+                continue
+            frac = min(1.0, max(0.0, ((4 - period) * 900 + clock) / 3600)) if period <= 4 else 0.0
+        for c in comp.get("competitors", []):
+            t = c.get("team") or {}
+            for key in (str(t.get("id") or ""), str(t.get("abbreviation") or "").upper()):
+                if key:
+                    left[key] = frac
+    return left
+
+
+def game_left(p):
+    """Fraction of a player's game still to play: from the NFL scoreboard's quarter and clock,
+    or estimated from the kickoff time if the scoreboard doesn't have his game."""
+    k = kickoff(p)
+    if not k:
+        return 0.0  # bye
+    for key in (PRO_TEAM_IDS.get(p.proTeam), str(p.proTeam).upper()):
+        if key in GAME_LEFT:
+            return GAME_LEFT[key]
+    now = datetime.now()
+    if now < k:
+        return 1.0
+    if now >= k + GAME_LENGTH:
+        return 0.0
+    return max(0.0, 1 - (now - k) / timedelta(hours=3))
+
+
+def live_projection(p):
+    """ESPN only gives each player a pregame projection. Like ESPN's own live projections,
+    this keeps what he has scored and adds his pregame projection for the part of his game left."""
+    return p.points + p.projected_points * game_left(p)
+
+
 def player_dict(p):
     if p is None:
         return None
     st, label = status_of(p)
     return {"name": short_name(p), "team": p.proTeam, "pts": round(p.points, 1),
-            "proj": round(p.projected_points, 1), "status": st, "label": label}
+            "proj": round(live_projection(p), 1), "proj0": round(p.projected_points, 1),
+            "status": st, "label": label}
 
 
 def lineup_rows(my_lineup, opp_lineup):
@@ -177,14 +234,9 @@ def remaining_sd(lineup):
     """Rough uncertainty in a team's remaining points.
     Each player still to play adds spread proportional to the points they still
     have left to score (full projection if not started, partial if mid-game)."""
-    now = datetime.now()
     var = 0.0
     for p in starters(lineup):
-        k = kickoff(p)
-        if not k or now >= k + GAME_LENGTH:
-            continue  # bye or final
-        frac_left = 1.0 if now < k else max(0.0, 1 - (now - k) / timedelta(hours=3))
-        var += (WIN_SPREAD * p.projected_points * frac_left) ** 2
+        var += (WIN_SPREAD * p.projected_points * game_left(p)) ** 2   # 0 for byes and finals
     return math.sqrt(var)
 
 
@@ -419,7 +471,7 @@ function wing(p, other, slot) {
   const name = String(p.name).replace(/ D\/ST$/, "");   // the chip already says D/ST
   return '<div class="row">' + chip + '<span class="pn">' + esc(name) + '</span>' +
     '<span class="pp' + won + '">' + f1(p.pts) + '</span></div>' +
-    '<div class="row row2">' + status(p) + '<span class="bar' + (p.proj > 0 && p.pts > p.proj ? " over" : "") +
+    '<div class="row row2">' + status(p) + '<span class="bar' + (p.proj0 > 0 && p.pts > p.proj0 ? " over" : "") +
     '"><i style="width:' + fill + '%"></i></span><span class="pjn">PROJ ' + f1(p.proj) + '</span></div>';
 }
 
@@ -594,6 +646,7 @@ def main():
     connected_at = time.time()
     showing = False
     last_log = None
+    clock_warned = False
     print(f"Watching league {LEAGUE_ID} for '{MY_TEAM}'. Ctrl+C to stop.")
 
     try:
@@ -605,6 +658,16 @@ def main():
 
                 week = league.current_week
                 boxes = league.box_scores(week)
+                try:
+                    left = fetch_game_left()
+                    clock_warned = False
+                except (requests.RequestException, ValueError) as e:
+                    left = {}
+                    if not clock_warned:
+                        print(f"Couldn't load the NFL scoreboard ({e}); estimating game clocks from kickoff times")
+                        clock_warned = True
+                GAME_LEFT.clear()
+                GAME_LEFT.update(left)
                 box, mine = find_my_box(boxes)
 
                 if not box:
